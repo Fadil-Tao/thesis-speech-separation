@@ -48,28 +48,28 @@ from implementation.skim.skim_separator import SkiMSeparator
 # Configuration
 # =============================================================================
 
-# Model configuration - Small-Causal variant
+# Model configuration - Optimized for TITML dataset (~5M parameters)
 MODEL_CONFIG = {
     "encoder": {
-        "channel": 512,
+        "channel": 256,
         "kernel_size": 32,
         "stride": 16,
     },
     "decoder": {
-        "channel": 512,
+        "channel": 256,
         "kernel_size": 32,
         "stride": 16,
     },
     "separator": {
-        "input_dim": 512,
-        "causal": True,
+        "input_dim": 256,
+        "causal": False,  # Non-causal for better offline separation quality
         "num_spk": 3,  # 3 speakers
         "predict_noise": False,
         "nonlinear": "relu",
-        "layer": 3,
-        "unit": 512,
+        "layer": 4,
+        "unit": 256,
         "segment_size": 20,
-        "dropout": 0.0,
+        "dropout": 0.1,
         "mem_type": "hc",
         "seg_overlap": False,
     },
@@ -77,12 +77,12 @@ MODEL_CONFIG = {
 
 # Training configuration
 TRAIN_CONFIG = {
-    "batch_size": 4,
+    "batch_size": 8,  # Increased from 4 for more stable gradients
     "num_epochs": 100,
     "learning_rate": 1e-3,
     "weight_decay": 1e-5,
     "gradient_clip": 5.0,
-    "patience": 10,
+    "patience": 20,  # Increased from 10 to handle noisy val curves
     "seed": 42,
 }
 
@@ -308,7 +308,9 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
         # Update progress bar
         # Update progress bar with both loss and SI-SNR
         si_snr_db = -loss.item()  # Convert negative loss to positive SI-SNR
-        pbar.set_postfix({"loss": f"{loss.item():.4f}", "SI-SNR": f"{si_snr_db:.2f} dB"})
+        pbar.set_postfix(
+            {"loss": f"{loss.item():.4f}", "SI-SNR": f"{si_snr_db:.2f} dB"}
+        )
 
     avg_loss = total_loss / num_batches
     return avg_loss
@@ -356,7 +358,12 @@ def validate(model, val_loader, device, epoch):
 
             # Update progress bar with both loss and SI-SNR
             val_si_snr_db = -loss.item()
-            pbar.set_postfix({"val_loss": f"{loss.item():.4f}", "val_SI-SNR": f"{val_si_snr_db:.2f} dB"})
+            pbar.set_postfix(
+                {
+                    "val_loss": f"{loss.item():.4f}",
+                    "val_SI-SNR": f"{val_si_snr_db:.2f} dB",
+                }
+            )
 
     avg_loss = total_loss / num_batches
     return avg_loss
@@ -430,7 +437,8 @@ def main():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=3,
+        patience=5,  # Increased from 3 to prevent premature LR decay
+        min_lr=1e-6,
         verbose=True,
     )
 

@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speech Separation Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect width="32" height="32" rx="8" fill="#0070f3"/>
+                        <path d="M8 16L14 10L20 16L14 22L8 16Z" fill="white"/>
+                        <path d="M14 16L20 10L26 16L20 22L14 16Z" fill="white" fill-opacity="0.5"/>
+                    </svg>
+                    <span>SpeechSep</span>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <a href="#evaluation" class="nav-item active" data-page="evaluation">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                    Model Evaluation
+                </a>
+                <a href="#dataset" class="nav-item" data-page="dataset">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                    </svg>
+                    Dataset
+                </a>
+                <a href="#comparison" class="nav-item" data-page="comparison">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 20V10"></path>
+                        <path d="M12 20V4"></path>
+                        <path d="M6 20v-6"></path>
+                    </svg>
+                    Comparison
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="status-dot online"></span>
+                    <span class="status-text">System Online</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="header">
+                <h1 id="page-title">Model Evaluation</h1>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" id="refresh-btn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+            </header>
+
+            <!-- Evaluation Page -->
+            <div id="evaluation-page" class="page active">
+                <!-- Model Selection -->
+                <section class="section">
+                    <div class="section-header">
+                        <h2>Select Model</h2>
+                    </div>
+                    <div class="card">
+                        <div class="model-selector">
+                            <label class="label">Model</label>
+                            <select id="model-select" class="select">
+                                <option value="">Loading models...</option>
+                            </select>
+                        </div>
+                        <div class="model-info" id="model-info" style="display: none;">
+                            <div class="info-grid">
+                                <div class="info-item">
+                                    <span class="info-label">Speakers</span>
+                                    <span class="info-value" id="model-speakers">-</span>
+                                </div>
+                                <div class="info-item">
+                                    <span class="info-label">Status</span>
+                                    <span class="info-value" id="model-status">-</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Audio Selection -->
+                <section class="section">
+                    <div class="section-header">
+                        <h2>Test Audio</h2>
+                    </div>
+                    <div class="card">
+                        <div class="tabs">
+                            <button class="tab active" data-tab="dataset">From Dataset</button>
+                            <button class="tab" data-tab="batch">Batch Evaluation</button>
+                            <button class="tab" data-tab="upload">Upload Audio</button>
+                        </div>
+                        
+                        <div class="tab-content active" id="dataset-tab">
+                            <div class="filters">
+                                <div class="filter-group">
+                                    <label class="label">Dataset</label>
+                                    <select id="dataset-select" class="select">
+                                        <option value="">Select dataset...</option>
+                                    </select>
+                                </div>
+                                <div class="filter-group">
+                                    <label class="label">Split</label>
+                                    <select id="split-select" class="select">
+                                        <option value="test">Test</option>
+                                        <option value="dev">Dev</option>
+                                        <option value="train">Train</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="samples-grid" id="samples-grid">
+                                <div class="empty-state">
+                                    <p>Select a dataset to view samples</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="tab-content" id="batch-tab">
+                            <div class="batch-config">
+                                <div class="filters">
+                                    <div class="filter-group">
+                                        <label class="label">Dataset</label>
+                                        <select id="batch-dataset-select" class="select">
+                                            <option value="">Select dataset...</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-group">
+                                        <label class="label">Split</label>
+                                        <select id="batch-split-select" class="select">
+                                            <option value="test" selected>Test</option>
+                                            <option value="dev">Dev</option>
+                                            <option value="train">Train</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-group">
+                                        <label class="label">Number of Samples</label>
+                                        <select id="batch-num-samples" class="select">
+                                            <option value="5">5 samples</option>
+                                            <option value="10" selected>10 samples</option>
+                                            <option value="20">20 samples</option>
+                                            <option value="50">50 samples</option>
+                                            <option value="100">100 samples</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <button class="btn btn-primary" id="run-batch-btn" style="margin-top: 20px;">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                    </svg>
+                                    Run Batch Evaluation
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="tab-content" id="upload-tab">
+                            <div class="upload-area" id="upload-area">
+                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="17 8 12 3 7 8"></polyline>
+                                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                                </svg>
+                                <p>Drag and drop audio file here</p>
+                                <p class="text-muted">or click to browse</p>
+                                <input type="file" id="file-input" accept="audio/*" hidden>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Batch Results -->
+                <section class="section" id="batch-results-section" style="display: none;">
+                    <div class="section-header">
+                        <h2>Batch Evaluation Results</h2>
+                        <button class="btn btn-secondary" id="export-batch-btn">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            Export Results
+                        </button>
+                    </div>
+                    
+                    <!-- Batch Summary -->
+                    <div class="metrics-grid" id="batch-summary-metrics">
+                        <!-- Dynamically populated -->
+                    </div>
+
+                    <!-- Batch Results Table -->
+                    <div class="card">
+                        <h3>Detailed Results</h3>
+                        <div class="table-container">
+                            <table class="data-table" id="batch-results-table">
+                                <thead>
+                                    <tr>
+                                        <th>Sample ID</th>
+                                        <th>Speaker</th>
+                                        <th>SI-SNR (dB)</th>
+                                        <th>STOI</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Dynamically populated -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Selected Audio -->
+                <section class="section" id="selected-audio-section" style="display: none;">
+                    <div class="section-header">
+                        <h2>Selected Audio</h2>
+                        <button class="btn btn-primary" id="evaluate-btn">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                            </svg>
+                            Run Evaluation
+                        </button>
+                    </div>
+                    <div class="card">
+                        <div class="audio-player-container">
+                            <div class="audio-info">
+                                <span class="audio-label">Mixture</span>
+                                <span class="audio-filename" id="selected-filename">-</span>
+                            </div>
+                            <div class="waveform-container">
+                                <canvas id="mixture-waveform" class="waveform"></canvas>
+                            </div>
+                            <audio id="mixture-audio" controls></audio>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Waveform Comparison -->
+                <section class="section" id="waveform-comparison-section" style="display: none;">
+                    <div class="section-header">
+                        <h2>Waveform Comparison</h2>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>Stacked Waveform View</h3>
+                        <div class="waveform-stack" id="waveform-stack">
+                            <canvas id="stacked-waveform-canvas"></canvas>
+                        </div>
+                        <div class="waveform-legend" id="waveform-legend">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-top: 20px;">
+                        <h3>Individual Waveforms</h3>
+                        <div class="waveform-comparison" id="waveform-comparison-rows">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Evaluation Results -->
+                <section class="section" id="results-section" style="display: none;">
+                    <div class="section-header">
+                        <h2>Results</h2>
+                    </div>
+                    
+                    <!-- Metrics Cards -->
+                    <div class="metrics-grid" id="metrics-grid">
+                        <!-- Dynamically populated -->
+                    </div>
+
+                    <!-- Separated Sources -->
+                    <div class="card" id="separated-sources">
+                        <h3>Separated Sources</h3>
+                        <div class="sources-list" id="sources-list">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+
+                    <!-- Audio Comparison -->
+                    <div class="card" id="comparison-section">
+                        <h3>Audio Comparison</h3>
+                        <div class="comparison-controls">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="sync-playback" checked>
+                                <span>Sync playback</span>
+                            </label>
+                        </div>
+                        <div class="comparison-grid" id="comparison-grid">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Dataset Page -->
+            <div id="dataset-page" class="page">
+                <section class="section">
+                    <div class="section-header">
+                        <h2>Dataset Overview</h2>
+                    </div>
+                    <div class="stats-grid" id="dataset-stats">
+                        <!-- Dynamically populated -->
+                    </div>
+                </section>
+
+                <section class="section">
+                    <div class="section-header">
+                        <h2>Samples Browser</h2>
+                    </div>
+                    <div class="card">
+                        <div class="filters">
+                            <div class="filter-group">
+                                <label class="label">Dataset</label>
+                                <select id="browser-dataset-select" class="select">
+                                    <option value="">Select dataset...</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label class="label">Split</label>
+                                <select id="browser-split-select" class="select">
+                                    <option value="train">Train</option>
+                                    <option value="dev">Dev</option>
+                                    <option value="test" selected>Test</option>
+                                    </select>
+                            </div>
+                        </div>
+                        <div class="table-container">
+                            <table class="data-table" id="samples-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Duration</th>
+                                        <th>Speakers</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Dynamically populated -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Comparison Page -->
+            <div id="comparison-page" class="page">
+                <section class="section">
+                    <div class="section-header">
+                        <h2>Model Comparison</h2>
+                    </div>
+                    <div class="card">
+                        <p class="text-muted">Select multiple models to compare their performance on the same audio sample.</p>
+                        <div class="comparison-placeholder">
+                            <p>Coming soon...</p>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay" style="display: none;">
+        <div class="loading-spinner"></div>
+        <p>Processing...</p>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

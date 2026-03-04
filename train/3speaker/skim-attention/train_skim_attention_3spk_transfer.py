@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Training script for SkiM Attention 3-Speaker model.
+"""Training script for SkiM Attention 3-Speaker model with Transfer Learning.
 
 This script trains a SkiM Attention model (with Multi-Head Self-Attention)
-for 3-speaker speech separation using the TITML-3spk synthetic dataset.
+for 3-speaker speech separation using transfer learning from a pretrained
+2-speaker model.
 
 Usage:
-    python train_skim_attention_3spk.py
+    python train_skim_attention_3spk_transfer.py
 
 The script will:
 1. Load the TITML-3spk dataset
-2. Build the SkiM Attention model with ESPnet framework
-3. Train with SI-SNR loss and PIT
-4. Save checkpoints and training curves
-5. Evaluate on test set
+2. Load pretrained weights from 2-speaker SkiM Attention model
+3. Reinitialize only the output layer (2->3 speakers dimension change)
+4. Train with lower learning rate (1e-4) to protect pretrained weights
+5. Save checkpoints and training curves
+6. Evaluate on test set
 """
 
 import os
@@ -78,20 +80,26 @@ MODEL_CONFIG = {
     },
 }
 
-# Training configuration
+# Training configuration - Transfer learning with lower LR
 TRAIN_CONFIG = {
-    "batch_size": 8,  # Increased from 4 for more stable gradients
+    "batch_size": 8,
     "num_epochs": 100,
-    "learning_rate": 1e-3,
+    "learning_rate": 1e-4,  # 10x smaller for transfer learning
     "weight_decay": 1e-5,
     "gradient_clip": 5.0,
-    "patience": 20,  # Increased from 10 to handle noisy val curves
+    "patience": 20,
     "seed": 42,
+}
+
+# Transfer learning configuration
+TRANSFER_CONFIG = {
+    "pretrained_path": "checkpoints/2speaker/skim-attention/best_model.pth",
+    "description": "Transfer from SkiM Attention 2-speaker to 3-speaker",
 }
 
 # Paths
 DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk"
-CHECKPOINT_DIR = project_root / "checkpoints" / "3speaker" / "skim-attention"
+CHECKPOINT_DIR = project_root / "checkpoints" / "3speaker" / "skim-attention-transfer"
 
 # Create checkpoint directory
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -181,14 +189,83 @@ def collate_fn(batch):
 
 
 # =============================================================================
+# Transfer Learning Functions
+# =============================================================================
+
+
+def load_pretrained_weights(model, pretrained_path, device):
+    """
+    Load pretrained 2-speaker weights into 3-speaker model.
+    Reinitializes only layers with shape mismatch (output layer).
+
+    Args:
+        model: Target 3-speaker model
+        pretrained_path: Path to 2-speaker checkpoint
+        device: torch device
+
+    Returns:
+        model: Model with loaded weights
+    """
+    pretrained_full_path = project_root / pretrained_path
+
+    if not pretrained_full_path.exists():
+        print(f"\n⚠️  Warning: Pretrained model not found at {pretrained_full_path}")
+        print("Training from scratch...")
+        return model
+
+    print(f"\n📥 Loading pretrained weights from: {pretrained_path}")
+    checkpoint = torch.load(pretrained_full_path, map_location=device)
+    pretrained_dict = checkpoint["model_state_dict"]
+    model_dict = model.state_dict()
+
+    # Filter out layers with shape mismatch
+    compatible_dict = {}
+    reinitialized_layers = []
+    skipped_layers = []
+
+    for k, v in pretrained_dict.items():
+        if k in model_dict:
+            if model_dict[k].shape == v.shape:
+                compatible_dict[k] = v
+            else:
+                reinitialized_layers.append((k, v.shape, model_dict[k].shape))
+        else:
+            skipped_layers.append(k)
+
+    # Load compatible weights
+    model_dict.update(compatible_dict)
+    model.load_state_dict(model_dict, strict=False)
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("Transfer Learning Summary")
+    print("=" * 60)
+    print(f"✓ Loaded: {len(compatible_dict)} layers from pretrained model")
+
+    if reinitialized_layers:
+        print(
+            f"\n🔄 Reinitialized {len(reinitialized_layers)} layer(s) due to shape mismatch:"
+        )
+        for name, old_shape, new_shape in reinitialized_layers:
+            print(f"   {name}: {old_shape} → {new_shape}")
+
+    if skipped_layers:
+        print(f"\n⚠️  Skipped {len(skipped_layers)} layer(s) not in target model")
+
+    print("=" * 60)
+
+    return model
+
+
+# =============================================================================
 # Model Building
 # =============================================================================
 
 
-def build_model(device):
-    """Build the SkiM Attention model."""
+def build_model(device, use_transfer=True):
+    """Build the SkiM Attention model with optional transfer learning."""
     print("\n" + "=" * 60)
-    print("Building SkiM Attention 3-Speaker Model")
+    print("Building SkiM Attention 3-Speaker Model (Transfer Learning)")
     print("=" * 60)
 
     # Encoder
@@ -203,7 +280,6 @@ def build_model(device):
     separator = SkiMAttentionSeparator(
         input_dim=MODEL_CONFIG["separator"]["input_dim"],
         causal=MODEL_CONFIG["separator"]["causal"],
-        # num_spk removed - using loss_wrappers instead
         predict_noise=MODEL_CONFIG["separator"]["predict_noise"],
         nonlinear=MODEL_CONFIG["separator"]["nonlinear"],
         layer=MODEL_CONFIG["separator"]["layer"],
@@ -242,10 +318,15 @@ def build_model(device):
         mask_module=None,
         loss_wrappers=[pit_wrapper],
         loss_type="si_snr",
-        # num_spk removed - using loss_wrappers instead
     )
 
     model = model.to(device)
+
+    # Load pretrained weights if enabled
+    if use_transfer:
+        model = load_pretrained_weights(
+            model, TRANSFER_CONFIG["pretrained_path"], device
+        )
 
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
@@ -311,8 +392,7 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
         total_loss += loss.item()
 
         # Update progress bar
-        # Update progress bar with both loss and SI-SNR
-        si_snr_db = -loss.item()  # Convert negative loss to positive SI-SNR
+        si_snr_db = -loss.item()
         pbar.set_postfix(
             {"loss": f"{loss.item():.4f}", "SI-SNR": f"{si_snr_db:.2f} dB"}
         )
@@ -361,7 +441,7 @@ def validate(model, val_loader, device, epoch):
 
             total_loss += loss.item()
 
-            # Update progress bar with both loss and SI-SNR
+            # Update progress bar
             val_si_snr_db = -loss.item()
             pbar.set_postfix(
                 {
@@ -391,6 +471,15 @@ def main():
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # Print transfer learning info
+    print("\n" + "=" * 60)
+    print("Transfer Learning Configuration")
+    print("=" * 60)
+    print(f"Source: {TRANSFER_CONFIG['pretrained_path']}")
+    print(f"Target: 3-speaker separation")
+    print(f"Learning Rate: {TRAIN_CONFIG['learning_rate']} (10x smaller)")
+    print("=" * 60)
 
     # Create datasets
     print("\nLoading datasets...")
@@ -425,8 +514,8 @@ def main():
     print(f"✓ Dev batches: {len(dev_loader)}")
     print(f"✓ Test batches: {len(test_loader)}")
 
-    # Build model
-    model = build_model(device)
+    # Build model with transfer learning
+    model = build_model(device, use_transfer=True)
 
     # Optimizer
     optimizer = torch.optim.Adam(
@@ -442,7 +531,7 @@ def main():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=5,  # Increased from 3 to prevent premature LR decay
+        patience=5,
         min_lr=1e-6,
         verbose=True,
     )
@@ -454,7 +543,7 @@ def main():
     val_losses = []
 
     print("\n" + "=" * 60)
-    print("Starting Training")
+    print("Starting Transfer Learning Training")
     print("=" * 60)
 
     for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
@@ -491,6 +580,7 @@ def main():
                 "val_loss": val_loss,
                 "best_val_loss": best_val_loss,
                 "config": MODEL_CONFIG,
+                "transfer_config": TRANSFER_CONFIG,
             }
             torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
             print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
@@ -519,7 +609,7 @@ def main():
             print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
     print("\n" + "=" * 60)
-    print("Training Complete!")
+    print("Transfer Learning Training Complete!")
     print("=" * 60)
     print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
 
@@ -556,6 +646,7 @@ def main():
             {
                 "model_config": MODEL_CONFIG,
                 "train_config": TRAIN_CONFIG,
+                "transfer_config": TRANSFER_CONFIG,
                 "best_val_loss": best_val_loss,
                 "best_si_snr": -best_val_loss,
             },

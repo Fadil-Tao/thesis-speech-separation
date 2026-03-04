@@ -4,3 +4,8 @@ visualization
 dataset
 .ruff_cache
 *.log
+*.pyc
+__*
+**/__pycache__/
+*.pyc
+**/*.pyc
