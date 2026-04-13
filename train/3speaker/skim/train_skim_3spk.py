@@ -19,11 +19,13 @@ import os
 import sys
 import json
 import random
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import soundfile as sf
+import librosa
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -69,7 +71,7 @@ MODEL_CONFIG = {
         "layer": 4,
         "unit": 256,
         "segment_size": 20,
-        "dropout": 0.1,
+        "dropout": 0.2,
         "mem_type": "hc",
         "seg_overlap": False,
     },
@@ -87,11 +89,56 @@ TRAIN_CONFIG = {
 }
 
 # Paths
-DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk"
+DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk-v2"
 CHECKPOINT_DIR = project_root / "checkpoints" / "3speaker" / "skim"
 
 # Create checkpoint directory
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_resume_path(resume_from):
+    """Resolve checkpoint path from absolute/relative/shorthand input."""
+    input_path = Path(resume_from)
+
+    # 1) Absolute path
+    if input_path.is_absolute() and input_path.exists():
+        return input_path
+
+    candidates = []
+
+    # 2) Relative to project root as provided
+    candidates.append(project_root / input_path)
+
+    # 3) Relative to checkpoints root if user passed 2speaker/... or 3speaker/...
+    if input_path.parts and input_path.parts[0] in {"2speaker", "3speaker"}:
+        candidates.append(project_root / "checkpoints" / input_path)
+
+    # 4) Relative to default 3-speaker SkiM checkpoint dir
+    candidates.append(CHECKPOINT_DIR / input_path.name)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # 5) Filename-only fallback: search across checkpoints/**
+    if len(input_path.parts) == 1:
+        matches = sorted((project_root / "checkpoints").glob(f"**/{input_path.name}"))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            match_list = "\n".join([f"- {m}" for m in matches[:10]])
+            raise FileNotFoundError(
+                "Multiple checkpoints matched your filename. "
+                "Please pass one full path:\n"
+                f"{match_list}"
+            )
+
+    searched = "\n".join([f"- {p}" for p in candidates])
+    raise FileNotFoundError(
+        "Checkpoint not found. Searched these paths:\n"
+        f"{searched}\n"
+        "Hint: use a path like checkpoints/3speaker/skim/checkpoint_epoch_30.pth"
+    )
 
 
 # =============================================================================
@@ -100,17 +147,28 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class IndonesianMixDataset(Dataset):
-    """Dataset for Indonesian speech mixtures (3 speakers)."""
+    """Dataset for Indonesian speech mixtures (3 speakers).
 
-    def __init__(self, split="train", dataset_dir=DATASET_DIR):
+    When ``augment=True`` (training), applies random speed perturbation
+    (0.95-1.05x) to make the model robust to slight pitch/tempo variation
+    and reduce overfitting to the limited speaker pool.
+    """
+
+    SPEED_FACTORS = [0.95, 0.975, 1.0, 1.0, 1.025, 1.05]  # bias toward 1.0
+
+    def __init__(self, split="train", dataset_dir=DATASET_DIR, augment=False,
+                 sample_rate=16000):
         self.split = split
         self.dataset_dir = Path(dataset_dir)
         self.split_dir = self.dataset_dir / split
+        self.augment = augment
+        self.sample_rate = sample_rate
 
         # Get all mixture files
         self.mix_files = sorted(list((self.split_dir / "mix").glob("*.wav")))
 
-        print(f"[{split}] Loaded {len(self.mix_files)} mixtures")
+        print(f"[{split}] Loaded {len(self.mix_files)} mixtures"
+              f"{' (augment ON)' if augment else ''}")
 
     def __len__(self):
         return len(self.mix_files)
@@ -119,13 +177,26 @@ class IndonesianMixDataset(Dataset):
         mix_file = self.mix_files[idx]
         file_id = mix_file.stem
 
-        # Load mixture
+        # Load mixture and sources
         mix, sr = sf.read(mix_file)
-
-        # Load sources (3 speakers)
         s1, _ = sf.read(self.split_dir / "s1" / f"{file_id}.wav")
         s2, _ = sf.read(self.split_dir / "s2" / f"{file_id}.wav")
         s3, _ = sf.read(self.split_dir / "s3" / f"{file_id}.wav")
+
+        if self.augment:
+            # Apply the SAME speed factor to mix and all sources so
+            # the alignment stays correct
+            factor = random.choice(self.SPEED_FACTORS)
+            if factor != 1.0:
+                new_sr = int(self.sample_rate * factor)
+                mix = librosa.resample(y=mix, orig_sr=self.sample_rate,
+                                       target_sr=new_sr)
+                s1 = librosa.resample(y=s1, orig_sr=self.sample_rate,
+                                      target_sr=new_sr)
+                s2 = librosa.resample(y=s2, orig_sr=self.sample_rate,
+                                      target_sr=new_sr)
+                s3 = librosa.resample(y=s3, orig_sr=self.sample_rate,
+                                      target_sr=new_sr)
 
         return {
             "mix": torch.FloatTensor(mix),
@@ -374,7 +445,7 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main():
+def main(resume_from=None, num_epochs=None):
     """Main training function."""
     # Set random seeds
     random.seed(TRAIN_CONFIG["seed"])
@@ -389,7 +460,7 @@ def main():
 
     # Create datasets
     print("\nLoading datasets...")
-    train_dataset = IndonesianMixDataset("train")
+    train_dataset = IndonesianMixDataset("train", augment=True)
     dev_dataset = IndonesianMixDataset("dev")
     test_dataset = IndonesianMixDataset("test")
 
@@ -444,6 +515,38 @@ def main():
 
     # Training loop
     best_val_loss = float("inf")
+    start_epoch = 1
+    target_num_epochs = (
+        num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
+    )
+
+    if resume_from is not None:
+        resume_path = resolve_resume_path(resume_from)
+
+        print(f"\nLoading checkpoint: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device)
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+        best_val_loss = checkpoint.get("best_val_loss", checkpoint.get("val_loss", best_val_loss))
+        start_epoch = checkpoint.get("epoch", 0) + 1
+
+        print(
+            f"✓ Resumed from epoch {start_epoch - 1}. "
+            f"Continuing until epoch {target_num_epochs}."
+        )
+
+    if start_epoch > target_num_epochs:
+        print(
+            f"Checkpoint is already at epoch {start_epoch - 1}, "
+            f"which is >= target epoch {target_num_epochs}."
+        )
+        return
+
     patience_counter = 0
     train_losses = []
     val_losses = []
@@ -452,7 +555,7 @@ def main():
     print("Starting Training")
     print("=" * 60)
 
-    for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
+    for epoch in range(start_epoch, target_num_epochs + 1):
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
         train_losses.append(train_loss)
@@ -506,8 +609,11 @@ def main():
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
                     "train_loss": train_loss,
                     "val_loss": val_loss,
+                    "best_val_loss": best_val_loss,
+                    "config": MODEL_CONFIG,
                 },
                 checkpoint_path,
             )
@@ -561,4 +667,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train SkiM 3-speaker model")
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=None,
+        help="Total epochs to train up to (default from TRAIN_CONFIG)",
+    )
+    args = parser.parse_args()
+
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs)
