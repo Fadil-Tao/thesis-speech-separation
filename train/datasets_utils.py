@@ -280,6 +280,7 @@ class IndonesianMixDataset(Dataset):
         num_speakers=2,
         augment=False,
         sample_rate=16000,
+        target_duration=5.0,
     ):
         self.split = split
         self.dataset_dir = Path(dataset_dir)
@@ -287,6 +288,8 @@ class IndonesianMixDataset(Dataset):
         self.num_speakers = num_speakers
         self.augment = augment
         self.sample_rate = sample_rate
+        self.target_duration = target_duration
+        self.target_len = int(target_duration * sample_rate)
 
         self.mix_files = sorted(list((self.split_dir / "mix").glob("*.wav")))
 
@@ -308,6 +311,17 @@ class IndonesianMixDataset(Dataset):
             for i in range(1, self.num_speakers + 1)
         ]
 
+        # Normalize length to target_len
+        def normalize_length(x):
+            if len(x) > self.target_len:
+                return x[:self.target_len]
+            if len(x) < self.target_len:
+                return np.pad(x, (0, self.target_len - len(x)))
+            return x
+
+        mix = normalize_length(mix)
+        sources = [normalize_length(s) for s in sources]
+
         if self.augment:
             factor = random.choice(self.SPEED_FACTORS)
             if factor != 1.0:
@@ -327,6 +341,24 @@ class IndonesianMixDataset(Dataset):
                     )
                     for s in sources
                 ]
+                # Resample back to original sr and normalize length after speed perturbation
+                mix = librosa.resample(
+                    y=mix,
+                    orig_sr=new_sr,
+                    target_sr=self.sample_rate,
+                    res_type="polyphase",
+                )
+                sources = [
+                    librosa.resample(
+                        y=s,
+                        orig_sr=new_sr,
+                        target_sr=self.sample_rate,
+                        res_type="polyphase",
+                    )
+                    for s in sources
+                ]
+                mix = normalize_length(mix)
+                sources = [normalize_length(s) for s in sources]
 
         sample = {"mix": torch.FloatTensor(mix), "file_id": file_id}
         for i, src in enumerate(sources, 1):

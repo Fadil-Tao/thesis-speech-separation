@@ -359,10 +359,10 @@ def main():
     )
     dev_dataset = IndonesianMixDataset(
         split="dev", dataset_dir=DATASET_DIR, num_speakers=3, augment=False
-    )
+    , target_duration=5.0)
     test_dataset = IndonesianMixDataset(
         split="test", dataset_dir=DATASET_DIR, num_speakers=3, augment=False
-    )
+    , target_duration=5.0)
 
     # Create data loaders with optimized settings
     train_loader = DataLoader(
