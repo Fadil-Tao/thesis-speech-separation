@@ -141,11 +141,17 @@ class DynamicMixDataset(Dataset):
 
     def _pick_speakers(self):
         if self.gender_balance and self.males and self.females:
-            r = random.random()
-            if r < 0.5 and len(self.males) >= 2:
-                return random.sample(self.males, 2) + random.sample(self.females, 1)
-            if r < 0.8 and len(self.females) >= 2:
-                return random.sample(self.males, 1) + random.sample(self.females, 2)
+            if self.num_speakers == 2:
+                # For 2-speaker: balance gender (50% M+F, 50% same gender)
+                if random.random() < 0.5:
+                    return [random.choice(self.males), random.choice(self.females)]
+            elif self.num_speakers == 3:
+                # For 3-speaker: prefer mixed gender (2M+1F or 1M+2F)
+                r = random.random()
+                if r < 0.5 and len(self.males) >= 2:
+                    return random.sample(self.males, 2) + random.sample(self.females, 1)
+                if r < 0.8 and len(self.females) >= 2:
+                    return random.sample(self.males, 1) + random.sample(self.females, 2)
         return random.sample(self.speaker_list, self.num_speakers)
 
     def _mix(self, audios):
