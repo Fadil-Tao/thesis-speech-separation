@@ -31,9 +31,15 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Add project root to path
+# Add project root and user site-packages to path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "train"))
+
+# Import shared dataset utilities
+from datasets_utils import (
+    build_utterance_split, DynamicMixDataset, IndonesianMixDataset
+)
 
 # ESPnet imports
 from espnet2.enh.encoder.conv_encoder import ConvEncoder
@@ -90,6 +96,7 @@ TRAIN_CONFIG = {
 
 # Paths
 DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk-v2"
+RAW_DIR = project_root / "dataset" / "raw" / "TTML-IDN"
 CHECKPOINT_DIR = project_root / "checkpoints" / "3speaker" / "skim"
 
 # Create checkpoint directory
@@ -144,108 +151,6 @@ def resolve_resume_path(resume_from):
 # =============================================================================
 # Dataset
 # =============================================================================
-
-
-class IndonesianMixDataset(Dataset):
-    """Dataset for Indonesian speech mixtures (3 speakers).
-
-    When ``augment=True`` (training), applies random speed perturbation
-    (0.95-1.05x) to make the model robust to slight pitch/tempo variation
-    and reduce overfitting to the limited speaker pool.
-    """
-
-    SPEED_FACTORS = [0.95, 0.975, 1.0, 1.0, 1.025, 1.05]  # bias toward 1.0
-
-    def __init__(self, split="train", dataset_dir=DATASET_DIR, augment=False,
-                 sample_rate=16000):
-        self.split = split
-        self.dataset_dir = Path(dataset_dir)
-        self.split_dir = self.dataset_dir / split
-        self.augment = augment
-        self.sample_rate = sample_rate
-
-        # Get all mixture files
-        self.mix_files = sorted(list((self.split_dir / "mix").glob("*.wav")))
-
-        print(f"[{split}] Loaded {len(self.mix_files)} mixtures"
-              f"{' (augment ON)' if augment else ''}")
-
-    def __len__(self):
-        return len(self.mix_files)
-
-    def __getitem__(self, idx):
-        mix_file = self.mix_files[idx]
-        file_id = mix_file.stem
-
-        # Load mixture and sources
-        mix, sr = sf.read(mix_file)
-        s1, _ = sf.read(self.split_dir / "s1" / f"{file_id}.wav")
-        s2, _ = sf.read(self.split_dir / "s2" / f"{file_id}.wav")
-        s3, _ = sf.read(self.split_dir / "s3" / f"{file_id}.wav")
-
-        if self.augment:
-            # Apply the SAME speed factor to mix and all sources so
-            # the alignment stays correct
-            factor = random.choice(self.SPEED_FACTORS)
-            if factor != 1.0:
-                new_sr = int(self.sample_rate * factor)
-                mix = librosa.resample(y=mix, orig_sr=self.sample_rate,
-                                       target_sr=new_sr)
-                s1 = librosa.resample(y=s1, orig_sr=self.sample_rate,
-                                      target_sr=new_sr)
-                s2 = librosa.resample(y=s2, orig_sr=self.sample_rate,
-                                      target_sr=new_sr)
-                s3 = librosa.resample(y=s3, orig_sr=self.sample_rate,
-                                      target_sr=new_sr)
-
-        return {
-            "mix": torch.FloatTensor(mix),
-            "s1": torch.FloatTensor(s1),
-            "s2": torch.FloatTensor(s2),
-            "s3": torch.FloatTensor(s3),
-            "file_id": file_id,
-        }
-
-
-def collate_fn(batch):
-    """Collate function for DataLoader."""
-    # Find max length in batch
-    max_len = max([b["mix"].shape[0] for b in batch])
-
-    # Pad sequences
-    mix_batch = []
-    s1_batch = []
-    s2_batch = []
-    s3_batch = []
-    file_ids = []
-
-    for b in batch:
-        mix = b["mix"]
-        s1 = b["s1"]
-        s2 = b["s2"]
-        s3 = b["s3"]
-
-        # Pad if necessary
-        if mix.shape[0] < max_len:
-            pad_len = max_len - mix.shape[0]
-            mix = torch.nn.functional.pad(mix, (0, pad_len))
-            s1 = torch.nn.functional.pad(s1, (0, pad_len))
-            s2 = torch.nn.functional.pad(s2, (0, pad_len))
-            s3 = torch.nn.functional.pad(s3, (0, pad_len))
-
-        mix_batch.append(mix)
-        s1_batch.append(s1)
-        s2_batch.append(s2)
-        s3_batch.append(s3)
-        file_ids.append(b["file_id"])
-
-    return {
-        "mix": torch.stack(mix_batch),
-        "s1": torch.stack(s1_batch),
-        "s2": torch.stack(s2_batch),
-        "s3": torch.stack(s3_batch),
-        "file_id": file_ids,
-    }
 
 
 # =============================================================================
@@ -325,8 +230,8 @@ def build_model(device):
 # =============================================================================
 
 
-def train_epoch(model, train_loader, optimizer, device, epoch):
-    """Train for one epoch."""
+def train_epoch(model, train_loader, optimizer, scaler, device, epoch):
+    """Train for one epoch with AMP."""
     model.train()
     total_loss = 0
     num_batches = len(train_loader)
@@ -350,33 +255,49 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
         speech_ref3 = s3
         ref_lengths = mix_lengths.clone()
 
-        # Forward pass
-        loss, stats, weight = model(
-            speech_mix=mix,
-            speech_mix_lengths=mix_lengths,
-            speech_ref1=speech_ref1,
-            speech_ref1_lengths=ref_lengths,
-            speech_ref2=speech_ref2,
-            speech_ref2_lengths=ref_lengths,
-            speech_ref3=speech_ref3,
-            speech_ref3_lengths=ref_lengths,
-        )
-
-        # Backward pass
         optimizer.zero_grad()
-        loss.backward()
+
+        # Forward pass with AMP
+        with torch.amp.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
+            loss, stats, weight = model(
+                speech_mix=mix,
+                speech_mix_lengths=mix_lengths,
+                speech_ref1=speech_ref1,
+                speech_ref1_lengths=ref_lengths,
+                speech_ref2=speech_ref2,
+                speech_ref2_lengths=ref_lengths,
+                speech_ref3=speech_ref3,
+                speech_ref3_lengths=ref_lengths,
+            )
+
+        # Check for NaN
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(
+                f"\n⚠️ Warning: NaN/Inf loss detected at batch {batch_idx}, skipping..."
+            )
+            continue
+
+        # Backward pass with gradient scaling
+        scaler.scale(loss).backward()
 
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(
+        scaler.unscale_(optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(), TRAIN_CONFIG["gradient_clip"]
         )
 
-        optimizer.step()
+        # Check gradient norm
+        if grad_norm > 10.0:
+            print(
+                f"\n⚠️ Warning: Large gradient norm ({grad_norm:.2f}), clipping applied"
+            )
+
+        scaler.step(optimizer)
+        scaler.update()
 
         # Accumulate loss
         total_loss += loss.item()
 
-        # Update progress bar
         # Update progress bar with both loss and SI-SNR
         si_snr_db = -loss.item()  # Convert negative loss to positive SI-SNR
         pbar.set_postfix(
@@ -388,7 +309,7 @@ def train_epoch(model, train_loader, optimizer, device, epoch):
 
 
 def validate(model, val_loader, device, epoch):
-    """Validate the model."""
+    """Validate the model with AMP."""
     model.eval()
     total_loss = 0
     num_batches = len(val_loader)
@@ -413,17 +334,18 @@ def validate(model, val_loader, device, epoch):
             speech_ref3 = s3
             ref_lengths = mix_lengths.clone()
 
-            # Forward pass
-            loss, stats, weight = model(
-                speech_mix=mix,
-                speech_mix_lengths=mix_lengths,
-                speech_ref1=speech_ref1,
-                speech_ref1_lengths=ref_lengths,
-                speech_ref2=speech_ref2,
-                speech_ref2_lengths=ref_lengths,
-                speech_ref3=speech_ref3,
-                speech_ref3_lengths=ref_lengths,
-            )
+            # Forward pass with AMP
+            with torch.amp.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
+                loss, stats, weight = model(
+                    speech_mix=mix,
+                    speech_mix_lengths=mix_lengths,
+                    speech_ref1=speech_ref1,
+                    speech_ref1_lengths=ref_lengths,
+                    speech_ref2=speech_ref2,
+                    speech_ref2_lengths=ref_lengths,
+                    speech_ref3=speech_ref3,
+                    speech_ref3_lengths=ref_lengths,
+                )
 
             total_loss += loss.item()
 
@@ -458,33 +380,55 @@ def main(resume_from=None, num_epochs=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Build utterance-level split from raw dataset
+    print("\nBuilding utterance-level train/dev/test split...")
+    train_utts, dev_utts, test_utts = build_utterance_split(
+        RAW_DIR, seed=TRAIN_CONFIG["seed"], train_ratio=0.8, dev_ratio=0.1
+    )
+
     # Create datasets
     print("\nLoading datasets...")
-    train_dataset = IndonesianMixDataset("train", augment=True)
-    dev_dataset = IndonesianMixDataset("dev")
-    test_dataset = IndonesianMixDataset("test")
+    train_dataset = DynamicMixDataset(
+        utterances_by_speaker=train_utts,
+        num_speakers=3,
+        target_duration=5.0,
+        target_sr=16000,
+        snr_range=(-5.0, 5.0),
+        epoch_size=28800,
+        gender_balance=True,
+        augment=True,
+    )
+    dev_dataset = IndonesianMixDataset(
+        split="dev", dataset_dir=DATASET_DIR, num_speakers=3, augment=False
+    )
+    test_dataset = IndonesianMixDataset(
+        split="test", dataset_dir=DATASET_DIR, num_speakers=3, augment=False
+    )
 
-    # Create data loaders
+    # Create data loaders with optimized settings
     train_loader = DataLoader(
         train_dataset,
         batch_size=TRAIN_CONFIG["batch_size"],
         shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
     )
     dev_loader = DataLoader(
         dev_dataset,
         batch_size=TRAIN_CONFIG["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=TRAIN_CONFIG["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     print(f"✓ Train batches: {len(train_loader)}")
@@ -502,6 +446,9 @@ def main(resume_from=None, num_epochs=None):
         eps=1e-8,
         weight_decay=TRAIN_CONFIG["weight_decay"],
     )
+
+    # AMP Gradient Scaler
+    scaler = torch.cuda.amp.GradScaler()
 
     # Scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -531,6 +478,8 @@ def main(resume_from=None, num_epochs=None):
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if "scaler_state_dict" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
         best_val_loss = checkpoint.get("best_val_loss", checkpoint.get("val_loss", best_val_loss))
         start_epoch = checkpoint.get("epoch", 0) + 1
@@ -557,7 +506,7 @@ def main(resume_from=None, num_epochs=None):
 
     for epoch in range(start_epoch, target_num_epochs + 1):
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
+        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
         train_losses.append(train_loss)
 
         # Validate
@@ -585,6 +534,7 @@ def main(resume_from=None, num_epochs=None):
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "best_val_loss": best_val_loss,
@@ -610,6 +560,7 @@ def main(resume_from=None, num_epochs=None):
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
                     "train_loss": train_loss,
                     "val_loss": val_loss,
                     "best_val_loss": best_val_loss,
