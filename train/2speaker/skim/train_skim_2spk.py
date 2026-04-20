@@ -399,7 +399,7 @@ def main():
     )
 
     # AMP Gradient Scaler
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
 
     # Scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
