@@ -163,15 +163,12 @@ class DynamicMixDataset(Dataset):
             offset = random.randint(0, self.max_offset)
             offset_audios.append(np.pad(audios[i], (offset, 0)))
 
-        # Align to common length
-        lens = [len(a) for a in offset_audios]
-        tlen = min(lens) if random.choice([True, False]) else max(lens)
-
+        # Align to common length (always target_len to maintain fixed clip length)
         def fit(x):
-            if len(x) > tlen:
-                return x[:tlen]
-            if len(x) < tlen:
-                return np.pad(x, (0, tlen - len(x)))
+            if len(x) > self.target_len:
+                return x[:self.target_len]
+            if len(x) < self.target_len:
+                return np.pad(x, (0, self.target_len - len(x)))
             return x
 
         aligned = [fit(a) for a in offset_audios]
@@ -211,11 +208,19 @@ class DynamicMixDataset(Dataset):
             if self.augment:
                 factor = random.choice(self.SPEED_FACTORS)
                 if factor != 1.0:
+                    # Speed up/slow down by resampling to different rate then back
                     new_sr = int(self.target_sr * factor)
                     mix = librosa.resample(
                         y=mix,
                         orig_sr=self.target_sr,
                         target_sr=new_sr,
+                        res_type="polyphase",
+                    )
+                    # Resample back to original sr (this is how speed perturbation works)
+                    mix = librosa.resample(
+                        y=mix,
+                        orig_sr=new_sr,
+                        target_sr=self.target_sr,
                         res_type="polyphase",
                     )
                     sources = [
@@ -225,6 +230,21 @@ class DynamicMixDataset(Dataset):
                             target_sr=new_sr,
                             res_type="polyphase",
                         )
+                        for s in sources
+                    ]
+                    sources = [
+                        librosa.resample(
+                            y=s,
+                            orig_sr=new_sr,
+                            target_sr=self.target_sr,
+                            res_type="polyphase",
+                        )
+                        for s in sources
+                    ]
+                    # Pad/truncate back to target_len after speed perturbation
+                    mix = mix[:self.target_len] if len(mix) > self.target_len else np.pad(mix, (0, self.target_len - len(mix)))
+                    sources = [
+                        s[:self.target_len] if len(s) > self.target_len else np.pad(s, (0, self.target_len - len(s)))
                         for s in sources
                     ]
 
