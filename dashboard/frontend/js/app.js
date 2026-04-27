@@ -218,7 +218,7 @@ async function loadDatasets() {
         state.datasets = data.datasets;
 
         // Populate dataset selects
-        const selects = ['dataset-select', 'browser-dataset-select', 'batch-dataset-select', 'cmp-dataset-select'];
+        const selects = ['dataset-select', 'browser-dataset-select', 'batch-dataset-select', 'cmp-dataset-select', 'viz-dataset-select'];
         selects.forEach(selectId => {
             const select = document.getElementById(selectId);
             select.innerHTML = '<option value="">Select dataset...</option>';
@@ -266,6 +266,9 @@ async function loadDatasets() {
 
         // Update dataset stats
         updateDatasetStats(data.datasets);
+
+        // Setup visualization section
+        initVizSection();
 
         // Setup batch evaluation button
         setupBatchEvaluation();
@@ -438,6 +441,108 @@ function updateDatasetStats(datasets) {
                 <div class="stat-label">Total Duration</div>
             `;
             statsGrid.appendChild(hoursCard);
+        }
+    });
+}
+
+// Dataset visualization section
+function initVizSection() {
+    const datasetSel = document.getElementById('viz-dataset-select');
+    const splitSel = document.getElementById('viz-split-select');
+    const splitGroup = document.getElementById('viz-split-group');
+    const tabsEl = document.getElementById('viz-tabs');
+    const imgContainer = document.getElementById('viz-image-container');
+    if (!datasetSel) return;
+
+    let currentAvailable = {};
+    let activeTab = null;
+
+    async function loadVizForDataset(datasetId) {
+        imgContainer.innerHTML = '<p class="text-muted">Loading...</p>';
+        tabsEl.innerHTML = '';
+        tabsEl.style.display = 'none';
+        splitGroup.hidden = true;
+
+        if (!datasetId) {
+            imgContainer.innerHTML = '<p class="text-muted">Select a dataset to view visualizations.</p>';
+            return;
+        }
+
+        const res = await fetch(`${API_BASE}/dataset/${datasetId}/viz/list`);
+        const data = await res.json();
+        currentAvailable = data.available || {};
+
+        if (!data.has_viz) {
+            imgContainer.innerHTML = '<p class="text-muted">No visualizations found for this dataset. Run <code>generate_dataset_visualizations.py</code> first.</p>';
+            return;
+        }
+
+        // Build tab buttons
+        const tabs = [];
+        if (currentAvailable.statistics) tabs.push({ key: 'statistics', label: 'Statistics', hasSplit: false });
+        if (currentAvailable.comparison_grid) tabs.push({ key: 'comparison_grid', label: 'Sample Grid', hasSplit: true });
+        if (currentAvailable.audio_properties) tabs.push({ key: 'audio_properties', label: 'Audio Properties', hasSplit: true });
+        if (currentAvailable.comparison) tabs.push({ key: 'comparison', label: 'Dataset Comparison', hasSplit: false, global: true });
+
+        tabsEl.style.display = 'flex';
+        tabs.forEach(tab => {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary';
+            btn.textContent = tab.label;
+            btn.dataset.tabKey = tab.key;
+            btn.dataset.hasSplit = tab.hasSplit ? '1' : '0';
+            btn.dataset.global = tab.global ? '1' : '0';
+            btn.addEventListener('click', () => selectTab(tab.key, datasetId, btn));
+            tabsEl.appendChild(btn);
+        });
+
+        // Auto-select first tab
+        if (tabs.length > 0) {
+            const firstBtn = tabsEl.querySelector('button');
+            selectTab(tabs[0].key, datasetId, firstBtn);
+        }
+    }
+
+    function selectTab(tabKey, datasetId, btn) {
+        activeTab = tabKey;
+        // Update button styles
+        tabsEl.querySelectorAll('button').forEach(b => b.classList.remove('btn-primary'));
+        if (btn) btn.classList.add('btn-primary');
+
+        const hasSplit = btn && btn.dataset.hasSplit === '1';
+        const isGlobal = btn && btn.dataset.global === '1';
+        splitGroup.hidden = !hasSplit;
+
+        showVizImage(tabKey, datasetId, isGlobal);
+    }
+
+    function showVizImage(tabKey, datasetId, isGlobal) {
+        const split = splitSel.value;
+        let imageName;
+        if (isGlobal) {
+            imageName = 'dataset_comparison.png';
+        } else if (tabKey === 'statistics') {
+            imageName = 'dataset_statistics.png';
+        } else {
+            imageName = `${tabKey}_${split}.png`;
+        }
+
+        const url = `${API_BASE}/dataset/${datasetId}/viz/${imageName}?t=${Date.now()}`;
+        imgContainer.innerHTML = `
+            <img src="${url}" alt="${imageName}"
+                 style="max-width:100%; border-radius:8px; cursor:zoom-in;"
+                 onerror="this.parentElement.innerHTML='<p class=\\'text-muted\\'>Image not available for this split.</p>'"
+                 onclick="window.open(this.src,'_blank')">
+            <p style="margin-top:8px; font-size:12px; color:var(--text-muted);">Click image to open full size</p>`;
+    }
+
+    datasetSel.addEventListener('change', e => loadVizForDataset(e.target.value));
+    splitSel.addEventListener('change', () => {
+        const datasetId = datasetSel.value;
+        if (activeTab && datasetId) {
+            const activeBtn = tabsEl.querySelector('button.btn-primary');
+            const isGlobal = activeBtn && activeBtn.dataset.global === '1';
+            showVizImage(activeTab, datasetId, isGlobal);
         }
     });
 }
@@ -1002,25 +1107,71 @@ async function loadTrainingInfo() {
             `;
             grid.appendChild(card);
 
-            if (info.has_curves) {
+            // Show all models that have any checkpoint data
+            if (info.best_model_exists || info.checkpoints.length > 0) {
                 const option = document.createElement('option');
                 option.value = key;
-                option.textContent = info.name ?? key;
+                option.textContent = (info.name ?? key) + (info.has_curves ? '' : ' (no graph yet)');
+                option.dataset.hasCurves = info.has_curves ? '1' : '0';
+                option.dataset.hasCheckpoints = (info.checkpoints.length > 0 || info.best_model_exists) ? '1' : '0';
                 modelSelect.appendChild(option);
             }
         });
 
         const freshSelect = modelSelect.cloneNode(true);
         modelSelect.parentNode.replaceChild(freshSelect, modelSelect);
+
+        const recoverBtn = document.getElementById('recover-curves-btn');
+
         freshSelect.addEventListener('change', (e) => {
             const container = document.getElementById('training-curve-container');
             if (!container) return;
-            if (!e.target.value) {
+            const key = e.target.value;
+            const selected = freshSelect.options[freshSelect.selectedIndex];
+            const hasCurves = selected && selected.dataset.hasCurves === '1';
+            const hasCheckpoints = selected && selected.dataset.hasCheckpoints === '1';
+
+            if (recoverBtn) {
+                recoverBtn.style.display = (!hasCurves && hasCheckpoints && key) ? '' : 'none';
+            }
+
+            if (!key) {
                 container.innerHTML = '<p class="text-muted">Select a model to view its training curves.</p>';
                 return;
             }
-            container.innerHTML = `<img src="${API_BASE}/training/${e.target.value}/image" alt="Training curves" style="max-width:100%;border-radius:8px;">`;
+            if (hasCurves) {
+                container.innerHTML = `<img src="${API_BASE}/training/${key}/image?t=${Date.now()}" alt="Training curves" style="max-width:100%;border-radius:8px;">`;
+            } else {
+                container.innerHTML = `<p class="text-muted">No training curves yet. Click "Recover Curves" to generate from checkpoints.</p>`;
+            }
         });
+
+        if (recoverBtn) {
+            const freshRecover = recoverBtn.cloneNode(true);
+            recoverBtn.parentNode.replaceChild(freshRecover, recoverBtn);
+            freshRecover.addEventListener('click', async () => {
+                const key = freshSelect.value;
+                if (!key) return;
+                const container = document.getElementById('training-curve-container');
+                freshRecover.disabled = true;
+                freshRecover.textContent = 'Recovering…';
+                try {
+                    const res = await fetch(`${API_BASE}/training/${key}/recover-curves`, { method: 'POST' });
+                    const result = await res.json();
+                    if (!res.ok) throw new Error(result.error || 'Failed');
+                    container.innerHTML = `<img src="${API_BASE}/training/${key}/image?t=${Date.now()}" alt="Training curves" style="max-width:100%;border-radius:8px;">`;
+                    freshRecover.style.display = 'none';
+                    // Update the option label
+                    const opt = freshSelect.options[freshSelect.selectedIndex];
+                    if (opt) { opt.textContent = opt.textContent.replace(' (no graph yet)', ''); opt.dataset.hasCurves = '1'; }
+                } catch (err) {
+                    container.innerHTML = `<p class="text-muted" style="color:var(--danger)">Recovery failed: ${err.message}</p>`;
+                } finally {
+                    freshRecover.disabled = false;
+                    freshRecover.innerHTML = '&#128200; Recover Curves';
+                }
+            });
+        }
 
         const refreshBtn = document.getElementById('refresh-training-btn');
         if (refreshBtn) {

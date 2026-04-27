@@ -335,6 +335,32 @@ def build_model(device, use_transfer=True):
 # =============================================================================
 
 
+def save_training_curves(train_losses, val_losses, out_dir):
+    """Save loss and SI-SNR curves. Called after every checkpoint and on interrupt."""
+    if not train_losses:
+        return
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label="Train Loss", marker="o", markersize=3)
+    plt.plot(val_losses, label="Val Loss", marker="s", markersize=3)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss (Negative SI-SNR)")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.subplot(1, 2, 2)
+    plt.plot([-l for l in train_losses], label="Train SI-SNR", marker="o", markersize=3)
+    plt.plot([-l for l in val_losses], label="Val SI-SNR", marker="s", markersize=3)
+    plt.xlabel("Epoch")
+    plt.ylabel("SI-SNR (dB)")
+    plt.title("Training and Validation SI-SNR")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "training_curves.png", dpi=150)
+    plt.close()
+
+
 def train_epoch(model, train_loader, optimizer, device, epoch):
     """Train for one epoch."""
     model.train()
@@ -541,114 +567,89 @@ def main():
     print("Starting Transfer Learning Training")
     print("=" * 60)
 
-    for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
-        # Train
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
-        train_losses.append(train_loss)
+    try:
+        for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
+            train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
+            train_losses.append(train_loss)
 
-        # Validate
-        val_loss = validate(model, dev_loader, device, epoch)
-        val_losses.append(val_loss)
+            val_loss = validate(model, dev_loader, device, epoch)
+            val_losses.append(val_loss)
 
-        # Scheduler step
-        scheduler.step(val_loss)
+            scheduler.step(val_loss)
 
-        # Print progress
-        print(
-            f"Epoch {epoch:3d}: Train Loss = {train_loss:.4f}, "
-            f"Val Loss = {val_loss:.4f}, "
-            f"Val SI-SNR = {-val_loss:.2f} dB"
-        )
-
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-
-            # Save checkpoint
-            checkpoint = {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "best_val_loss": best_val_loss,
-                "config": MODEL_CONFIG,
-                "transfer_config": TRANSFER_CONFIG,
-            }
-            torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
-            print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
-        else:
-            patience_counter += 1
-
-        # Early stopping
-        if patience_counter >= TRAIN_CONFIG["patience"]:
-            print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
-            print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
-            break
-
-        # Save periodic checkpoint
-        if epoch % 10 == 0:
-            checkpoint_path = CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                },
-                checkpoint_path,
+            print(
+                f"Epoch {epoch:3d}: Train Loss = {train_loss:.4f}, "
+                f"Val Loss = {val_loss:.4f}, "
+                f"Val SI-SNR = {-val_loss:.2f} dB"
             )
-            print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
-    print("\n" + "=" * 60)
-    print("Transfer Learning Training Complete!")
-    print("=" * 60)
-    print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "best_val_loss": best_val_loss,
+                        "config": MODEL_CONFIG,
+                        "transfer_config": TRANSFER_CONFIG,
+                        "train_losses": train_losses,
+                        "val_losses": val_losses,
+                    },
+                    CHECKPOINT_DIR / "best_model.pth",
+                )
+                print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
+            else:
+                patience_counter += 1
 
-    # Plot training curves
-    plt.figure(figsize=(12, 5))
+            if patience_counter >= TRAIN_CONFIG["patience"]:
+                print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
+                print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
+                break
 
-    # Loss curves
-    plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label="Train Loss", marker="o", markersize=3)
-    plt.plot(val_losses, label="Val Loss", marker="s", markersize=3)
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss (Negative SI-SNR)")
-    plt.title("Training and Validation Loss")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+            if epoch % 10 == 0:
+                checkpoint_path = CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth"
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "train_losses": train_losses,
+                        "val_losses": val_losses,
+                    },
+                    checkpoint_path,
+                )
+                print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
-    # SI-SNR curves
-    plt.subplot(1, 2, 2)
-    plt.plot([-l for l in train_losses], label="Train SI-SNR", marker="o", markersize=3)
-    plt.plot([-l for l in val_losses], label="Val SI-SNR", marker="s", markersize=3)
-    plt.xlabel("Epoch")
-    plt.ylabel("SI-SNR (dB)")
-    plt.title("Training and Validation SI-SNR")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+            save_training_curves(train_losses, val_losses, CHECKPOINT_DIR)
 
-    plt.tight_layout()
-    plt.savefig(CHECKPOINT_DIR / "training_curves.png", dpi=150)
-    print(f"✓ Training curves saved")
-
-    # Save config
-    with open(CHECKPOINT_DIR / "config.json", "w") as f:
-        json.dump(
-            {
-                "model_config": MODEL_CONFIG,
-                "train_config": TRAIN_CONFIG,
-                "transfer_config": TRANSFER_CONFIG,
-                "best_val_loss": best_val_loss,
-                "best_si_snr": -best_val_loss,
-            },
-            f,
-            indent=2,
-        )
-    print(f"✓ Config saved")
+    except KeyboardInterrupt:
+        print("\n⚠️ Training interrupted by user")
+    finally:
+        if train_losses:
+            print("\n" + "=" * 60)
+            print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
+            save_training_curves(train_losses, val_losses, CHECKPOINT_DIR)
+            print(f"✓ Training curves saved")
+            with open(CHECKPOINT_DIR / "config.json", "w") as f:
+                json.dump(
+                    {
+                        "model_config": MODEL_CONFIG,
+                        "train_config": TRAIN_CONFIG,
+                        "transfer_config": TRANSFER_CONFIG,
+                        "best_val_loss": best_val_loss,
+                        "best_si_snr": -best_val_loss,
+                    },
+                    f,
+                    indent=2,
+                )
+            print(f"✓ Config saved")
 
 
 if __name__ == "__main__":

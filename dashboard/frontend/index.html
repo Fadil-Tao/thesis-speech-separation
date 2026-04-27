@@ -344,6 +344,34 @@
 
                 <section class="section">
                     <div class="section-header">
+                        <h2>Visualizations</h2>
+                    </div>
+                    <div class="card">
+                        <div style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px;">
+                            <div class="filter-group" style="margin-bottom:0;">
+                                <label class="label">Dataset</label>
+                                <select id="viz-dataset-select" class="select">
+                                    <option value="">Select dataset...</option>
+                                </select>
+                            </div>
+                            <div class="filter-group" style="margin-bottom:0;" id="viz-split-group" hidden>
+                                <label class="label">Split</label>
+                                <select id="viz-split-select" class="select">
+                                    <option value="train">Train</option>
+                                    <option value="dev">Dev</option>
+                                    <option value="test">Test</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="viz-tabs" style="display:none; margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;"></div>
+                        <div id="viz-image-container" style="text-align:center; min-height:120px;">
+                            <p class="text-muted">Select a dataset to view visualizations.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="section">
+                    <div class="section-header">
                         <h2>Samples Browser</h2>
                     </div>
                     <div class="card">
@@ -481,11 +509,16 @@
                         <h2>Training Curves</h2>
                     </div>
                     <div class="card">
-                        <div class="filter-group" style="margin-bottom: 16px;">
-                            <label class="label">Model</label>
-                            <select id="training-model-select" class="select">
-                                <option value="">Select model...</option>
-                            </select>
+                        <div style="display:flex; gap:12px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
+                            <div class="filter-group" style="margin-bottom:0;">
+                                <label class="label">Model</label>
+                                <select id="training-model-select" class="select">
+                                    <option value="">Select model...</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-secondary" id="recover-curves-btn" style="display:none;">
+                                &#128200; Recover Curves
+                            </button>
                         </div>
                         <div id="training-curve-container" style="text-align:center;">
                             <p class="text-muted">Select a model to view its training curves.</p>

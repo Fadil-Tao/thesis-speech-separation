@@ -746,6 +746,92 @@ def get_training_image(model_key):
     return send_from_directory(str(ckpt_dir), "training_curves.png")
 
 
+@app.route("/api/training/<model_key>/recover-curves", methods=["POST"])
+def recover_training_curves(model_key):
+    """Reconstruct training_curves.png from whatever checkpoints exist."""
+    if model_key not in MODEL_CONFIGS:
+        return jsonify({"error": "Unknown model"}), 404
+
+    ckpt_dir = MODEL_CONFIGS[model_key]["path"].parent
+    points = {}
+
+    # Collect loss values from periodic checkpoints
+    for p in sorted(ckpt_dir.glob("checkpoint_epoch_*.pth")):
+        try:
+            c = torch.load(p, map_location="cpu", weights_only=False)
+            epoch = c.get("epoch")
+            if epoch is None:
+                continue
+            if "train_losses" in c and c["train_losses"]:
+                # Full history stored — use it and stop scanning
+                train_losses = c["train_losses"]
+                val_losses = c["val_losses"]
+                epochs = list(range(1, len(train_losses) + 1))
+                _write_curves_png(epochs, train_losses, val_losses, ckpt_dir)
+                return jsonify({"recovered": len(train_losses), "source": "full_history"})
+            if "train_loss" in c and "val_loss" in c:
+                points[epoch] = (c["train_loss"], c["val_loss"])
+        except Exception:
+            continue
+
+    # Also check best model
+    best_path = MODEL_CONFIGS[model_key]["path"]
+    if best_path.exists():
+        try:
+            c = torch.load(best_path, map_location="cpu", weights_only=False)
+            if "train_losses" in c and c["train_losses"]:
+                train_losses = c["train_losses"]
+                val_losses = c["val_losses"]
+                epochs = list(range(1, len(train_losses) + 1))
+                _write_curves_png(epochs, train_losses, val_losses, ckpt_dir)
+                return jsonify({"recovered": len(train_losses), "source": "full_history"})
+            epoch = c.get("epoch")
+            if epoch and "train_loss" in c and "val_loss" in c:
+                points[epoch] = (c["train_loss"], c["val_loss"])
+        except Exception:
+            pass
+
+    if not points:
+        return jsonify({"error": "No usable checkpoint data found"}), 404
+
+    epochs = sorted(points)
+    train_losses = [points[e][0] for e in epochs]
+    val_losses = [points[e][1] for e in epochs]
+    _write_curves_png(epochs, train_losses, val_losses, ckpt_dir)
+    return jsonify({"recovered": len(epochs), "source": "sparse_checkpoints", "epochs": epochs})
+
+
+def _write_curves_png(epochs, train_losses, val_losses, out_dir):
+    """Write training_curves.png to out_dir."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, train_losses, label="Train Loss", marker="o", markersize=4)
+    plt.plot(epochs, val_losses, label="Val Loss", marker="s", markersize=4)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss (Negative SI-SNR)")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, [-l for l in train_losses], label="Train SI-SNR", marker="o", markersize=4)
+    plt.plot(epochs, [-l for l in val_losses], label="Val SI-SNR", marker="s", markersize=4)
+    plt.xlabel("Epoch")
+    plt.ylabel("SI-SNR (dB)")
+    plt.title("Training and Validation SI-SNR")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(out_dir / "training_curves.png", dpi=150)
+    plt.close()
+
+
 @app.route("/api/waveform", methods=["POST"])
 def get_waveform():
     """Get waveform data for visualization."""
@@ -784,6 +870,81 @@ def get_waveform():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+VIZ_DIR = project_root / "visualization" / "dataset-vizualization"
+
+
+def _resolve_viz_folder(dataset_id):
+    """Map dataset_id (e.g. 'titml-2spk') to the viz sub-folder (e.g. 'TITML-2spk')."""
+    if not VIZ_DIR.exists():
+        return None
+    for d in VIZ_DIR.iterdir():
+        if d.is_dir() and d.name.lower() == dataset_id.replace("-", "_").lower().replace("_", "-"):
+            return d
+        if d.is_dir() and d.name.lower() == dataset_id.lower():
+            return d
+        # Try matching TITML-2spk against titml-2spk-v2 etc.
+        if d.is_dir() and dataset_id.startswith(d.name.lower()):
+            return d
+    # Try prefix match the other way
+    for d in VIZ_DIR.iterdir():
+        if d.is_dir() and d.name.lower().replace("-", "") == dataset_id.lower().replace("-", ""):
+            return d
+    return None
+
+
+@app.route("/api/dataset/<dataset_id>/viz/list", methods=["GET"])
+def list_viz_images(dataset_id):
+    """Return available visualization image categories for a dataset."""
+    viz_folder = _resolve_viz_folder(dataset_id)
+    available = {}
+
+    # Dataset-level comparison (top-level)
+    comparison_img = VIZ_DIR / "dataset_comparison.png"
+    if comparison_img.exists():
+        available["comparison"] = True
+
+    if viz_folder is None:
+        return jsonify({"available": available, "has_viz": bool(available)})
+
+    for split in ["train", "dev", "test"]:
+        if (viz_folder / f"comparison_grid_{split}.png").exists():
+            available.setdefault("comparison_grid", []).append(split)
+        if (viz_folder / f"audio_properties_{split}.png").exists():
+            available.setdefault("audio_properties", []).append(split)
+
+    if (viz_folder / "dataset_statistics.png").exists():
+        available["statistics"] = True
+
+    return jsonify({"available": available, "has_viz": bool(available)})
+
+
+@app.route("/api/dataset/<dataset_id>/viz/<image_name>", methods=["GET"])
+def get_viz_image(dataset_id, image_name):
+    """Serve a visualization PNG for a dataset."""
+    # Sanitize
+    if ".." in image_name or "/" in image_name:
+        return jsonify({"error": "Invalid image name"}), 400
+
+    if not image_name.endswith(".png"):
+        image_name += ".png"
+
+    # dataset_comparison lives at top level
+    if image_name == "dataset_comparison.png":
+        if (VIZ_DIR / image_name).exists():
+            return send_from_directory(str(VIZ_DIR), image_name)
+        return jsonify({"error": "Not found"}), 404
+
+    viz_folder = _resolve_viz_folder(dataset_id)
+    if viz_folder is None:
+        return jsonify({"error": "No visualizations found for this dataset"}), 404
+
+    img_path = viz_folder / image_name
+    if not img_path.exists():
+        return jsonify({"error": f"{image_name} not found"}), 404
+
+    return send_from_directory(str(viz_folder), image_name)
 
 
 @app.route("/")
