@@ -49,6 +49,7 @@ if user_site not in sys.path:
 
 # ESPnet imports
 from espnet2.enh.encoder.conv_encoder import ConvEncoder
+from implementation.conv_encoder_abs import ConvEncoderAbs
 from espnet2.enh.decoder.conv_decoder import ConvDecoder
 from espnet2.enh.espnet_model import ESPnetEnhancementModel
 from espnet2.enh.loss.criterions.time_domain import SISNRLoss
@@ -137,7 +138,7 @@ def build_model(device):
     separator = SkiMSeparator(
         input_dim=MODEL_CONFIG["separator"]["input_dim"],
         causal=MODEL_CONFIG["separator"]["causal"],
-        # num_spk removed - using loss_wrappers instead
+        num_spk=MODEL_CONFIG["separator"]["num_spk"],
         predict_noise=MODEL_CONFIG["separator"]["predict_noise"],
         nonlinear=MODEL_CONFIG["separator"]["nonlinear"],
         layer=MODEL_CONFIG["separator"]["layer"],

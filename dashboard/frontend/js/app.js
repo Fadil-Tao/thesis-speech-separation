@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initUploadArea();
     loadModels();
     loadDatasets();
+    loadTrainingInfo();
 });
 
 // Navigation
@@ -48,7 +49,8 @@ function initNavigation() {
             const titles = {
                 'evaluation': 'Model Evaluation',
                 'dataset': 'Dataset Overview',
-                'comparison': 'Model Comparison'
+                'comparison': 'Model Comparison',
+                'training': 'Training'
             };
             pageTitle.textContent = titles[page];
             
@@ -60,6 +62,7 @@ function initNavigation() {
     document.getElementById('refresh-btn').addEventListener('click', () => {
         loadModels();
         loadDatasets();
+        loadTrainingInfo();
     });
 }
 
@@ -159,6 +162,27 @@ async function loadModels() {
             select.appendChild(option);
         });
 
+        // Populate comparison model checkboxes
+        const cmpCheckboxes = document.getElementById('cmp-model-checkboxes');
+        if (cmpCheckboxes) {
+            cmpCheckboxes.innerHTML = '';
+            data.models.forEach(model => {
+                const label = document.createElement('label');
+                label.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;';
+                label.innerHTML = `
+                    <input type="checkbox" value="${model.id}" ${!model.exists ? 'disabled' : ''}>
+                    <span${!model.exists ? ' style="opacity:0.5"' : ''}>${model.name}</span>
+                `;
+                cmpCheckboxes.appendChild(label);
+            });
+        }
+
+        // Wire run-comparison button
+        const runCmpBtn = document.getElementById('run-comparison-btn');
+        if (runCmpBtn) {
+            runCmpBtn.addEventListener('click', runComparison);
+        }
+
         select.addEventListener('change', (e) => {
             const modelId = e.target.value;
             if (modelId) {
@@ -191,7 +215,7 @@ async function loadDatasets() {
         state.datasets = data.datasets;
 
         // Populate dataset selects
-        const selects = ['dataset-select', 'browser-dataset-select', 'batch-dataset-select'];
+        const selects = ['dataset-select', 'browser-dataset-select', 'batch-dataset-select', 'cmp-dataset-select'];
         selects.forEach(selectId => {
             const select = document.getElementById(selectId);
             select.innerHTML = '<option value="">Select dataset...</option>';
@@ -946,6 +970,120 @@ async function loadSamplesTable(datasetId, split) {
 function playSample(audioPath) {
     const audio = new Audio(`/api/audio/dataset/${audioPath.replace(/^.*dataset\//, '')}`);
     audio.play();
+}
+
+// Load training info
+async function loadTrainingInfo() {
+    try {
+        const response = await fetch(`${API_BASE}/training`);
+        const data = await response.json();
+
+        const grid = document.getElementById('training-summary-grid');
+        const modelSelect = document.getElementById('training-model-select');
+        if (!grid || !modelSelect) return;
+
+        grid.innerHTML = '';
+        modelSelect.innerHTML = '<option value="">Select model...</option>';
+
+        Object.entries(data).forEach(([key, info]) => {
+            const card = document.createElement('div');
+            card.className = 'stat-card';
+            const epoch = info.best_epoch ?? info.last_epoch ?? '—';
+            const loss = info.best_val_loss != null ? info.best_val_loss.toFixed(4) : '—';
+            card.innerHTML = `
+                <div class="stat-value">${loss}</div>
+                <div class="stat-label">${info.name ?? key}<br><small>Best loss @ epoch ${epoch}</small></div>
+            `;
+            grid.appendChild(card);
+
+            if (info.has_curves) {
+                const option = document.createElement('option');
+                option.value = key;
+                option.textContent = info.name ?? key;
+                modelSelect.appendChild(option);
+            }
+        });
+
+        const freshSelect = modelSelect.cloneNode(true);
+        modelSelect.parentNode.replaceChild(freshSelect, modelSelect);
+        freshSelect.addEventListener('change', (e) => {
+            const container = document.getElementById('training-curve-container');
+            if (!container) return;
+            if (!e.target.value) {
+                container.innerHTML = '<p class="text-muted">Select a model to view its training curves.</p>';
+                return;
+            }
+            container.innerHTML = `<img src="${API_BASE}/training/${e.target.value}/image" alt="Training curves" style="max-width:100%;border-radius:8px;">`;
+        });
+
+        const refreshBtn = document.getElementById('refresh-training-btn');
+        if (refreshBtn) {
+            const freshBtn = refreshBtn.cloneNode(true);
+            refreshBtn.parentNode.replaceChild(freshBtn, refreshBtn);
+            freshBtn.addEventListener('click', loadTrainingInfo);
+        }
+    } catch (error) {
+        console.error('Error loading training info:', error);
+    }
+}
+
+// Run model comparison
+async function runComparison() {
+    const datasetId = document.getElementById('cmp-dataset-select').value;
+    const split = document.getElementById('cmp-split-select').value;
+    const numSamples = parseInt(document.getElementById('cmp-num-samples').value);
+
+    if (!datasetId) {
+        alert('Please select a dataset');
+        return;
+    }
+
+    const checked = Array.from(
+        document.querySelectorAll('#cmp-model-checkboxes input[type=checkbox]:checked')
+    ).map(cb => cb.value);
+
+    if (checked.length === 0) {
+        alert('Please select at least one model');
+        return;
+    }
+
+    showLoading(true);
+    const tbody = document.querySelector('#cmp-results-table tbody');
+    tbody.innerHTML = '';
+
+    try {
+        for (const modelId of checked) {
+            const response = await fetch(`${API_BASE}/evaluate-batch`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: modelId, dataset: datasetId, split, num_samples: numSamples })
+            });
+            const data = await response.json();
+
+            const row = document.createElement('tr');
+            if (data.success) {
+                const m = data.average_metrics;
+                row.innerHTML = `
+                    <td>${modelId}</td>
+                    <td>${m.avg_si_snr ?? '—'}</td>
+                    <td>${m.std_si_snr ?? '—'}</td>
+                    <td>${m.avg_stoi ?? '—'}</td>
+                    <td>${data.num_evaluated}</td>
+                `;
+            } else {
+                row.innerHTML = `<td>${modelId}</td><td colspan="4" style="color:var(--error)">${data.error}</td>`;
+            }
+            tbody.appendChild(row);
+        }
+
+        document.getElementById('cmp-results-section').style.display = 'block';
+        document.getElementById('cmp-results-section').scrollIntoView({ behavior: 'smooth' });
+    } catch (error) {
+        console.error('Comparison error:', error);
+        alert('Error running comparison: ' + error.message);
+    } finally {
+        showLoading(false);
+    }
 }
 
 // Loading overlay

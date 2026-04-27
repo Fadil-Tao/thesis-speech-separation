@@ -56,7 +56,7 @@ MODEL_CONFIGS = {
             "layer": 4,
             "unit": 256,
             "segment_size": 20,
-            "dropout": 0.1,
+            "dropout": 0.2,
             "mem_type": "hc",
             "seg_overlap": False,
         },
@@ -78,7 +78,7 @@ MODEL_CONFIGS = {
             "layer": 4,
             "unit": 256,
             "segment_size": 20,
-            "dropout": 0.1,
+            "dropout": 0.2,
             "mem_type": "hc",
             "seg_overlap": False,
             "num_heads": 4,
@@ -97,7 +97,7 @@ MODEL_CONFIGS = {
             "layer": 4,
             "unit": 256,
             "segment_size": 20,
-            "dropout": 0.1,
+            "dropout": 0.2,
             "mem_type": "hc",
             "seg_overlap": False,
         },
@@ -119,7 +119,7 @@ MODEL_CONFIGS = {
             "layer": 4,
             "unit": 256,
             "segment_size": 20,
-            "dropout": 0.1,
+            "dropout": 0.2,
             "mem_type": "hc",
             "seg_overlap": False,
             "num_heads": 4,
@@ -132,23 +132,36 @@ loaded_models = {}
 
 
 def build_model(model_key, device):
-    """Build and load model."""
+    """Build and load model, deriving num_spk from the checkpoint config."""
     config = MODEL_CONFIGS[model_key]
+    checkpoint_path = config["path"]
 
-    # Encoder
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Infer actual num_spk from the output layer weight shape
+    # output_fc.1.weight shape is [num_spk * input_dim, input_dim, 1]
+    state = checkpoint["model_state_dict"]
+    out_key = "separator.skim.output_fc.1.weight"
+    if out_key in state:
+        input_dim = config["config"]["input_dim"]
+        num_spk = state[out_key].shape[0] // input_dim
+        print(f"Inferred num_spk={num_spk} from checkpoint weights")
+    else:
+        num_spk = config["num_spk"]
+        print(f"Using configured num_spk={num_spk}")
+
+    sep_kwargs = {**config["config"], "num_spk": num_spk}
+
     encoder = ConvEncoder(channel=256, kernel_size=32, stride=16)
-
-    # Separator
-    separator = config["separator_class"](**config["config"])
-
-    # Decoder
+    separator = config["separator_class"](**sep_kwargs)
     decoder = ConvDecoder(channel=256, kernel_size=32, stride=16)
 
-    # Loss
     criterion = SISNRLoss()
     pit_wrapper = PITSolver(criterion=criterion)
 
-    # Full model
     model = ESPnetEnhancementModel(
         encoder=encoder,
         separator=separator,
@@ -158,22 +171,13 @@ def build_model(model_key, device):
         loss_type="si_snr",
     )
 
-    # Load checkpoint
-    checkpoint_path = config["path"]
-    if checkpoint_path.exists():
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint["model_state_dict"])
-            print(f"Loaded checkpoint from {checkpoint_path}")
-        except Exception as e:
-            print(f"Warning: Could not load checkpoint from {checkpoint_path}: {e}")
-    else:
-        print(f"Warning: Checkpoint not found at {checkpoint_path}")
+    model.load_state_dict(checkpoint["model_state_dict"])
+    print(f"Loaded checkpoint from {checkpoint_path} (num_spk={num_spk})")
 
     model = model.to(device)
     model.eval()
 
-    return model, config["num_spk"]
+    return model, num_spk
 
 
 def get_model(model_key):
@@ -187,6 +191,16 @@ def get_model(model_key):
             "device": device,
         }
     return loaded_models[model_key]
+
+
+def normalize_audio(separated, mixture):
+    """Scale each separated signal so its RMS matches the mixture's RMS."""
+    mix_rms = np.sqrt(np.mean(mixture ** 2) + 1e-10)
+    out = []
+    for s in separated:
+        s_rms = np.sqrt(np.mean(s ** 2) + 1e-10)
+        out.append(s * (mix_rms / s_rms))
+    return out
 
 
 def calculate_si_snr(estimate, reference):
@@ -248,36 +262,40 @@ def list_models():
 
 @app.route("/api/datasets", methods=["GET"])
 def list_datasets():
-    """List available datasets."""
+    """List available datasets (auto-discovers all TITML-* dirs)."""
     datasets = []
     dataset_dir = project_root / "dataset" / "synthetic"
 
-    for dataset_name in ["TITML-2spk", "TITML-3spk"]:
-        dataset_path = dataset_dir / dataset_name
-        if dataset_path.exists():
-            # Count samples
-            splits = {}
-            for split in ["train", "dev", "test"]:
-                split_path = dataset_path / split / "mix"
-                if split_path.exists():
-                    count = len(list(split_path.glob("*.wav")))
-                    splits[split] = count
+    if not dataset_dir.exists():
+        return jsonify({"datasets": []})
 
-            # Load metadata if exists
-            info_path = dataset_path / "dataset_info.json"
-            info = {}
+    for dataset_path in sorted(dataset_dir.iterdir()):
+        if not dataset_path.is_dir() or not dataset_path.name.startswith("TITML-"):
+            continue
+
+        splits = {}
+        for split in ["train", "dev", "test"]:
+            split_path = dataset_path / split / "mix"
+            if split_path.exists():
+                splits[split] = len(list(split_path.glob("*.wav")))
+
+        # Load metadata (try metadata.json first, then dataset_info.json)
+        info = {}
+        for info_name in ["metadata.json", "train/metadata.json", "dataset_info.json"]:
+            info_path = dataset_path / info_name
             if info_path.exists():
                 with open(info_path) as f:
                     info = json.load(f)
+                break
 
-            datasets.append(
-                {
-                    "id": dataset_name.lower(),
-                    "name": dataset_name,
-                    "splits": splits,
-                    "info": info,
-                }
-            )
+        datasets.append(
+            {
+                "id": dataset_path.name.lower(),
+                "name": dataset_path.name,
+                "splits": splits,
+                "info": info,
+            }
+        )
 
     return jsonify({"datasets": datasets})
 
@@ -288,8 +306,16 @@ def get_dataset_samples(dataset_id):
     split = request.args.get("split", "test")
     limit = int(request.args.get("limit", 20))
 
-    dataset_name = "TITML-2spk" if "2spk" in dataset_id else "TITML-3spk"
-    dataset_path = project_root / "dataset" / "synthetic" / dataset_name / split
+    # Resolve dataset path: dataset_id is the lowercase name e.g. "titml-2spk-v2"
+    dataset_dir = project_root / "dataset" / "synthetic"
+    dataset_name = next(
+        (d.name for d in dataset_dir.iterdir()
+         if d.is_dir() and d.name.lower() == dataset_id),
+        None,
+    )
+    if dataset_name is None:
+        return jsonify({"error": f"Dataset '{dataset_id}' not found"}), 404
+    dataset_path = dataset_dir / dataset_name / split
 
     samples = []
     mix_files = sorted(list((dataset_path / "mix").glob("*.wav")))[:limit]
@@ -335,44 +361,13 @@ def evaluate():
         audio_tensor = torch.FloatTensor(audio).unsqueeze(0).to(device)
         lengths = torch.LongTensor([len(audio)]).to(device)
 
-        # Inference using ESPnet model forward
+        # Separate using forward_enhance (no PIT reordering)
         with torch.no_grad():
-            # Prepare reference dict for PIT
-            ref_dict = {}
-            dataset_path = Path(audio_path).parent.parent
-            for i in range(1, num_spk + 1):
-                gt_path = dataset_path / f"s{i}" / Path(audio_path).name
-                if gt_path.exists():
-                    gt_audio, _ = sf.read(gt_path)
-                    if len(gt_audio.shape) > 1:
-                        gt_audio = np.mean(gt_audio, axis=1)
-                    ref_dict[f"speech_ref{i}"] = (
-                        torch.FloatTensor(gt_audio).unsqueeze(0).to(device)
-                    )
-                    ref_dict[f"speech_ref{i}_lengths"] = torch.LongTensor(
-                        [len(gt_audio)]
-                    ).to(device)
+            speech_pre, _, _, _ = model.forward_enhance(audio_tensor, lengths)
+            separated = [s.squeeze(0).cpu().numpy() for s in speech_pre[:num_spk]]
 
-            # Forward pass through full model
-            outputs = model.forward(
-                speech_mix=audio_tensor, speech_mix_lengths=lengths, **ref_dict
-            )
-
-            # Get separated speech from stats
-            separated = []
-            if hasattr(model, "stats"):
-                for i in range(1, num_spk + 1):
-                    key = f"wav_spk{i}"
-                    if key in model.stats:
-                        sep_audio = model.stats[key].squeeze(0).cpu().numpy()
-                        separated.append(sep_audio)
-
-            # Fallback: if no separated audio in stats, try to get from model output
-            if len(separated) == 0:
-                # Use forward_enhance which properly handles the full pipeline
-                speech_pre, _, _, _ = model.forward_enhance(audio_tensor, lengths)
-                for i, sep in enumerate(speech_pre[:num_spk]):
-                    separated.append(sep.squeeze(0).cpu().numpy())
+        # Normalize output RMS to match input (relu masks are unbounded)
+        separated = normalize_audio(separated, audio)
 
         # Save separated audio
         results = []
@@ -389,19 +384,31 @@ def evaluate():
                 }
             )
 
-        # Calculate metrics if ground truth available
+        # Calculate metrics with best-permutation matching
         metrics = {}
         dataset_path = Path(audio_path).parent.parent
+        refs = []
         for i in range(1, num_spk + 1):
             gt_path = dataset_path / f"s{i}" / Path(audio_path).name
             if gt_path.exists():
                 gt_audio, _ = sf.read(gt_path)
-                sep_audio = separated[i - 1]
+                if len(gt_audio.shape) > 1:
+                    gt_audio = np.mean(gt_audio, axis=1)
+                refs.append((i, gt_audio))
 
+        if len(refs) == num_spk:
+            from itertools import permutations
+            ref_audios = [r[1] for r in refs]
+            best_perm = max(
+                permutations(range(num_spk)),
+                key=lambda p: sum(calculate_si_snr(separated[p[j]], ref_audios[j]) for j in range(num_spk))
+            )
+            for j in range(num_spk):
+                sep_audio = separated[best_perm[j]]
+                gt_audio = ref_audios[j]
                 si_snr = calculate_si_snr(sep_audio, gt_audio)
                 stoi_score = calculate_stoi(sep_audio, gt_audio, sr)
-
-                metrics[f"spk{i}"] = {
+                metrics[f"spk{j + 1}"] = {
                     "si_snr": round(float(si_snr), 2),
                     "stoi": round(float(stoi_score), 3) if stoi_score else None,
                 }
@@ -455,9 +462,16 @@ def evaluate_batch():
         num_spk = model_info["num_spk"]
         device = model_info["device"]
 
-        # Get samples
-        dataset_name = "TITML-2spk" if "2spk" in dataset_id else "TITML-3spk"
-        dataset_path = project_root / "dataset" / "synthetic" / dataset_name / split
+        # Resolve dataset path
+        dataset_dir = project_root / "dataset" / "synthetic"
+        dataset_name = next(
+            (d.name for d in dataset_dir.iterdir()
+             if d.is_dir() and d.name.lower() == dataset_id),
+            None,
+        )
+        if dataset_name is None:
+            return jsonify({"error": f"Dataset '{dataset_id}' not found"}), 404
+        dataset_path = dataset_dir / dataset_name / split
         mix_files = sorted(list((dataset_path / "mix").glob("*.wav")))[:num_samples]
 
         results = []
@@ -469,66 +483,51 @@ def evaluate_batch():
             # Load audio
             audio, sr = sf.read(mix_file)
             if len(audio.shape) > 1:
-                audio = np.mean(audio.shape, axis=1)
+                audio = np.mean(audio, axis=1)
 
             # Convert to tensor
             audio_tensor = torch.FloatTensor(audio).unsqueeze(0).to(device)
             lengths = torch.LongTensor([len(audio)]).to(device)
 
-            # Inference using ESPnet model forward
+            # Separate using forward_enhance (no PIT reordering)
             with torch.no_grad():
-                # Prepare reference dict for PIT
-                ref_dict = {}
-                for i in range(1, num_spk + 1):
-                    gt_path = dataset_path / f"s{i}" / f"{file_id}.wav"
-                    if gt_path.exists():
-                        gt_audio, _ = sf.read(gt_path)
-                        if len(gt_audio.shape) > 1:
-                            gt_audio = np.mean(gt_audio, axis=1)
-                        ref_dict[f"speech_ref{i}"] = (
-                            torch.FloatTensor(gt_audio).unsqueeze(0).to(device)
-                        )
-                        ref_dict[f"speech_ref{i}_lengths"] = torch.LongTensor(
-                            [len(gt_audio)]
-                        ).to(device)
+                speech_pre, _, _, _ = model.forward_enhance(audio_tensor, lengths)
+                separated = [s.squeeze(0).cpu().numpy() for s in speech_pre[:num_spk]]
 
-                # Forward pass through full model
-                outputs = model.forward(
-                    speech_mix=audio_tensor, speech_mix_lengths=lengths, **ref_dict
-                )
+            # Normalize output RMS to match input (relu masks are unbounded)
+            separated = normalize_audio(separated, audio)
 
-                # Get separated speech from stats
-                separated = []
-                if hasattr(model, "stats"):
-                    for i in range(1, num_spk + 1):
-                        key = f"wav_spk{i}"
-                        if key in model.stats:
-                            sep_audio = model.stats[key].squeeze(0).cpu().numpy()
-                            separated.append(sep_audio)
-
-                # Fallback: if no separated audio in stats, try to get from model output
-                if len(separated) == 0:
-                    # Use forward_enhance which properly handles the full pipeline
-                    speech_pre, _, _, _ = model.forward_enhance(audio_tensor, lengths)
-                    for i, sep in enumerate(speech_pre[:num_spk]):
-                        separated.append(sep.squeeze(0).cpu().numpy())
-
-            # Calculate metrics
-            sample_metrics = {"file_id": file_id, "speakers": {}}
+            # Load ground-truth references
+            refs = []
             for i in range(1, num_spk + 1):
                 gt_path = dataset_path / f"s{i}" / f"{file_id}.wav"
                 if gt_path.exists():
                     gt_audio, _ = sf.read(gt_path)
-                    sep_audio = separated[i - 1]
+                    if len(gt_audio.shape) > 1:
+                        gt_audio = np.mean(gt_audio, axis=1)
+                    refs.append(gt_audio)
 
+            # Best-permutation SI-SNR (mirrors PIT so scores are fair)
+            sample_metrics = {"file_id": file_id, "speakers": {}}
+            if len(refs) == num_spk and len(separated) == num_spk:
+                from itertools import permutations
+                best_perm = None
+                best_sum = -1e9
+                for perm in permutations(range(num_spk)):
+                    s = sum(calculate_si_snr(separated[perm[j]], refs[j]) for j in range(num_spk))
+                    if s > best_sum:
+                        best_sum = s
+                        best_perm = perm
+
+                for j in range(num_spk):
+                    sep_audio = separated[best_perm[j]]
+                    gt_audio = refs[j]
                     si_snr = calculate_si_snr(sep_audio, gt_audio)
                     stoi_score = calculate_stoi(sep_audio, gt_audio, sr)
-
-                    sample_metrics["speakers"][f"spk{i}"] = {
+                    sample_metrics["speakers"][f"spk{j + 1}"] = {
                         "si_snr": round(float(si_snr), 2),
                         "stoi": round(float(stoi_score), 3) if stoi_score else None,
                     }
-
                     total_metrics["si_snr"].append(si_snr)
                     if stoi_score:
                         total_metrics["stoi"].append(stoi_score)
@@ -562,6 +561,67 @@ def evaluate_batch():
         import traceback
 
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/api/training", methods=["GET"])
+def get_training_info():
+    """Return training config and loss history for all checkpoint dirs."""
+    checkpoints_root = project_root / "checkpoints"
+    results = []
+
+    for model_key, cfg in MODEL_CONFIGS.items():
+        ckpt_dir = cfg["path"].parent
+        entry = {
+            "model": model_key,
+            "checkpoint_dir": str(ckpt_dir),
+            "best_model_exists": cfg["path"].exists(),
+            "config": None,
+            "best_epoch": None,
+            "best_val_si_snr": None,
+            "checkpoints": [],
+        }
+
+        # Load config.json saved by training script
+        config_path = ckpt_dir / "config.json"
+        if config_path.exists():
+            with open(config_path) as f:
+                saved = json.load(f)
+            entry["config"] = saved.get("train_config")
+            entry["best_val_si_snr"] = saved.get("best_si_snr")
+
+        # Best model metadata
+        if cfg["path"].exists():
+            try:
+                ckpt = torch.load(cfg["path"], map_location="cpu")
+                entry["best_epoch"] = ckpt.get("epoch")
+                if entry["best_val_si_snr"] is None:
+                    val_loss = ckpt.get("val_loss")
+                    if val_loss is not None:
+                        entry["best_val_si_snr"] = round(-float(val_loss), 2)
+            except Exception:
+                pass
+
+        # List periodic checkpoints
+        if ckpt_dir.exists():
+            entry["checkpoints"] = sorted(
+                p.name for p in ckpt_dir.glob("checkpoint_epoch_*.pth")
+            )
+
+        results.append(entry)
+
+    return jsonify({"training": results})
+
+
+@app.route("/api/training/<model_key>/image")
+def get_training_image(model_key):
+    """Serve training_curves.png for a model."""
+    if model_key not in MODEL_CONFIGS:
+        return jsonify({"error": "Unknown model"}), 404
+    ckpt_dir = MODEL_CONFIGS[model_key]["path"].parent
+    img_path = ckpt_dir / "training_curves.png"
+    if not img_path.exists():
+        return jsonify({"error": "No training curves image found"}), 404
+    return send_from_directory(str(ckpt_dir), "training_curves.png")
 
 
 @app.route("/api/waveform", methods=["POST"])

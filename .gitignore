@@ -1,7 +1,9 @@
 checkpoints
 .venv
 visualization
-dataset
+dataset/raw
+dataset/synthetic
+dataset/zips
 .ruff_cache
 *.log
 *.pyc

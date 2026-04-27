@@ -276,6 +276,7 @@ def build_model(device, use_transfer=True):
     separator = SkiMSeparator(
         input_dim=MODEL_CONFIG["separator"]["input_dim"],
         causal=MODEL_CONFIG["separator"]["causal"],
+        num_spk=MODEL_CONFIG["separator"]["num_spk"],
         predict_noise=MODEL_CONFIG["separator"]["predict_noise"],
         nonlinear=MODEL_CONFIG["separator"]["nonlinear"],
         layer=MODEL_CONFIG["separator"]["layer"],
