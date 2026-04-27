@@ -9,7 +9,7 @@ Usage:
     python train_skim_attention_3spk_transfer.py
 
 The script will:
-1. Load the TITML-3spk dataset
+1. Load the TITML-3spk-v2 dataset
 2. Load pretrained weights from 2-speaker SkiM Attention model
 3. Reinitialize only the output layer (2->3 speakers dimension change)
 4. Train with lower learning rate (1e-4) to protect pretrained weights
@@ -21,19 +21,24 @@ import os
 import sys
 import json
 import random
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import soundfile as sf
+from torch.utils.data import DataLoader
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from datetime import datetime
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "train"))
+
+# Import shared dataset utilities
+from datasets_utils import (
+    build_utterance_split, DynamicMixDataset, IndonesianMixDataset
+)
 
 # ESPnet imports
 from espnet2.enh.encoder.conv_encoder import ConvEncoder
@@ -52,7 +57,6 @@ from implementation.skim_attention.skim_attention_separator import (
 # Configuration
 # =============================================================================
 
-# Model configuration - Optimized for TITML dataset (~5M parameters)
 MODEL_CONFIG = {
     "encoder": {
         "channel": 256,
@@ -66,8 +70,8 @@ MODEL_CONFIG = {
     },
     "separator": {
         "input_dim": 256,
-        "causal": False,  # Non-causal for better offline separation quality
-        "num_spk": 3,  # 3 speakers
+        "causal": False,
+        "num_spk": 3,
         "predict_noise": False,
         "nonlinear": "relu",
         "layer": 4,
@@ -80,7 +84,6 @@ MODEL_CONFIG = {
     },
 }
 
-# Training configuration - Transfer learning with lower LR
 TRAIN_CONFIG = {
     "batch_size": 8,
     "num_epochs": 100,
@@ -91,101 +94,17 @@ TRAIN_CONFIG = {
     "seed": 42,
 }
 
-# Transfer learning configuration
 TRANSFER_CONFIG = {
     "pretrained_path": "checkpoints/2speaker/skim-attention/best_model.pth",
     "description": "Transfer from SkiM Attention 2-speaker to 3-speaker",
 }
 
 # Paths
-DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk"
+DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk-v2"
+RAW_DIR = project_root / "dataset" / "raw" / "TTML-IDN"
 CHECKPOINT_DIR = project_root / "checkpoints" / "3speaker" / "skim-attention-transfer"
 
-# Create checkpoint directory
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# =============================================================================
-# Dataset
-# =============================================================================
-
-
-class IndonesianMixDataset(Dataset):
-    """Dataset for Indonesian speech mixtures (3 speakers)."""
-
-    def __init__(self, split="train", dataset_dir=DATASET_DIR):
-        self.split = split
-        self.dataset_dir = Path(dataset_dir)
-        self.split_dir = self.dataset_dir / split
-
-        # Get all mixture files
-        self.mix_files = sorted(list((self.split_dir / "mix").glob("*.wav")))
-
-        print(f"[{split}] Loaded {len(self.mix_files)} mixtures")
-
-    def __len__(self):
-        return len(self.mix_files)
-
-    def __getitem__(self, idx):
-        mix_file = self.mix_files[idx]
-        file_id = mix_file.stem
-
-        # Load mixture
-        mix, sr = sf.read(mix_file)
-
-        # Load sources (3 speakers)
-        s1, _ = sf.read(self.split_dir / "s1" / f"{file_id}.wav")
-        s2, _ = sf.read(self.split_dir / "s2" / f"{file_id}.wav")
-        s3, _ = sf.read(self.split_dir / "s3" / f"{file_id}.wav")
-
-        return {
-            "mix": torch.FloatTensor(mix),
-            "s1": torch.FloatTensor(s1),
-            "s2": torch.FloatTensor(s2),
-            "s3": torch.FloatTensor(s3),
-            "file_id": file_id,
-        }
-
-
-def collate_fn(batch):
-    """Collate function for DataLoader."""
-    # Find max length in batch
-    max_len = max([b["mix"].shape[0] for b in batch])
-
-    # Pad sequences
-    mix_batch = []
-    s1_batch = []
-    s2_batch = []
-    s3_batch = []
-    file_ids = []
-
-    for b in batch:
-        mix = b["mix"]
-        s1 = b["s1"]
-        s2 = b["s2"]
-        s3 = b["s3"]
-
-        # Pad if necessary
-        if mix.shape[0] < max_len:
-            pad_len = max_len - mix.shape[0]
-            mix = torch.nn.functional.pad(mix, (0, pad_len))
-            s1 = torch.nn.functional.pad(s1, (0, pad_len))
-            s2 = torch.nn.functional.pad(s2, (0, pad_len))
-            s3 = torch.nn.functional.pad(s3, (0, pad_len))
-
-        mix_batch.append(mix)
-        s1_batch.append(s1)
-        s2_batch.append(s2)
-        s3_batch.append(s3)
-        file_ids.append(b["file_id"])
-
-    return {
-        "mix": torch.stack(mix_batch),
-        "s1": torch.stack(s1_batch),
-        "s2": torch.stack(s2_batch),
-        "s3": torch.stack(s3_batch),
-        "file_id": file_ids,
-    }
 
 
 # =============================================================================
@@ -194,18 +113,7 @@ def collate_fn(batch):
 
 
 def load_pretrained_weights(model, pretrained_path, device):
-    """
-    Load pretrained 2-speaker weights into 3-speaker model.
-    Reinitializes only layers with shape mismatch (output layer).
-
-    Args:
-        model: Target 3-speaker model
-        pretrained_path: Path to 2-speaker checkpoint
-        device: torch device
-
-    Returns:
-        model: Model with loaded weights
-    """
+    """Load pretrained 2-speaker weights, skip layers with shape mismatch."""
     pretrained_full_path = project_root / pretrained_path
 
     if not pretrained_full_path.exists():
@@ -218,7 +126,6 @@ def load_pretrained_weights(model, pretrained_path, device):
     pretrained_dict = checkpoint["model_state_dict"]
     model_dict = model.state_dict()
 
-    # Filter out layers with shape mismatch
     compatible_dict = {}
     reinitialized_layers = []
     skipped_layers = []
@@ -232,20 +139,16 @@ def load_pretrained_weights(model, pretrained_path, device):
         else:
             skipped_layers.append(k)
 
-    # Load compatible weights
     model_dict.update(compatible_dict)
     model.load_state_dict(model_dict, strict=False)
 
-    # Print summary
     print("\n" + "=" * 60)
     print("Transfer Learning Summary")
     print("=" * 60)
     print(f"✓ Loaded: {len(compatible_dict)} layers from pretrained model")
 
     if reinitialized_layers:
-        print(
-            f"\n🔄 Reinitialized {len(reinitialized_layers)} layer(s) due to shape mismatch:"
-        )
+        print(f"\n🔄 Reinitialized {len(reinitialized_layers)} layer(s) due to shape mismatch:")
         for name, old_shape, new_shape in reinitialized_layers:
             print(f"   {name}: {old_shape} → {new_shape}")
 
@@ -253,7 +156,6 @@ def load_pretrained_weights(model, pretrained_path, device):
         print(f"\n⚠️  Skipped {len(skipped_layers)} layer(s) not in target model")
 
     print("=" * 60)
-
     return model
 
 
@@ -268,7 +170,6 @@ def build_model(device, use_transfer=True):
     print("Building SkiM Attention 3-Speaker Model (Transfer Learning)")
     print("=" * 60)
 
-    # Encoder
     encoder = ConvEncoder(
         channel=MODEL_CONFIG["encoder"]["channel"],
         kernel_size=MODEL_CONFIG["encoder"]["kernel_size"],
@@ -276,7 +177,6 @@ def build_model(device, use_transfer=True):
     )
     print(f"✓ Encoder: Conv1D ({MODEL_CONFIG['encoder']['channel']} channels)")
 
-    # Separator with Attention
     separator = SkiMAttentionSeparator(
         input_dim=MODEL_CONFIG["separator"]["input_dim"],
         causal=MODEL_CONFIG["separator"]["causal"],
@@ -298,7 +198,6 @@ def build_model(device, use_transfer=True):
         f"{MODEL_CONFIG['separator']['num_spk']} speakers)"
     )
 
-    # Decoder
     decoder = ConvDecoder(
         channel=MODEL_CONFIG["decoder"]["channel"],
         kernel_size=MODEL_CONFIG["decoder"]["kernel_size"],
@@ -306,12 +205,10 @@ def build_model(device, use_transfer=True):
     )
     print(f"✓ Decoder: ConvTranspose1D")
 
-    # Loss function
     criterion = SISNRLoss()
     pit_wrapper = PITSolver(criterion=criterion)
     print(f"✓ Loss: SI-SNR with PIT")
 
-    # Full model
     model = ESPnetEnhancementModel(
         encoder=encoder,
         separator=separator,
@@ -323,13 +220,9 @@ def build_model(device, use_transfer=True):
 
     model = model.to(device)
 
-    # Load pretrained weights if enabled
     if use_transfer:
-        model = load_pretrained_weights(
-            model, TRANSFER_CONFIG["pretrained_path"], device
-        )
+        model = load_pretrained_weights(model, TRANSFER_CONFIG["pretrained_path"], device)
 
-    # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel parameters: {num_params:,}")
 
@@ -341,69 +234,65 @@ def build_model(device, use_transfer=True):
 # =============================================================================
 
 
-def train_epoch(model, train_loader, optimizer, device, epoch):
-    """Train for one epoch."""
+def train_epoch(model, train_loader, optimizer, scaler, device, epoch):
+    """Train for one epoch with AMP."""
     model.train()
     total_loss = 0
     num_batches = len(train_loader)
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for batch_idx, batch in enumerate(pbar):
-        # Move to device
         mix = batch["mix"].to(device)
         s1 = batch["s1"].to(device)
         s2 = batch["s2"].to(device)
         s3 = batch["s3"].to(device)
 
-        # Prepare inputs for ESPnet model
         batch_size = mix.size(0)
         mix_lengths = torch.full(
             (batch_size,), mix.size(1), dtype=torch.long, device=device
         )
-
-        speech_ref1 = s1
-        speech_ref2 = s2
-        speech_ref3 = s3
         ref_lengths = mix_lengths.clone()
 
-        # Forward pass
-        loss, stats, weight = model(
-            speech_mix=mix,
-            speech_mix_lengths=mix_lengths,
-            speech_ref1=speech_ref1,
-            speech_ref1_lengths=ref_lengths,
-            speech_ref2=speech_ref2,
-            speech_ref2_lengths=ref_lengths,
-            speech_ref3=speech_ref3,
-            speech_ref3_lengths=ref_lengths,
-        )
-
-        # Backward pass
         optimizer.zero_grad()
-        loss.backward()
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(
+        with torch.amp.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
+            loss, stats, weight = model(
+                speech_mix=mix,
+                speech_mix_lengths=mix_lengths,
+                speech_ref1=s1,
+                speech_ref1_lengths=ref_lengths,
+                speech_ref2=s2,
+                speech_ref2_lengths=ref_lengths,
+                speech_ref3=s3,
+                speech_ref3_lengths=ref_lengths,
+            )
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"\n⚠️ Warning: NaN/Inf loss at batch {batch_idx}, skipping...")
+            continue
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(), TRAIN_CONFIG["gradient_clip"]
         )
 
-        optimizer.step()
+        if grad_norm > 10.0:
+            print(f"\n⚠️ Warning: Large gradient norm ({grad_norm:.2f}), clipping applied")
 
-        # Accumulate loss
+        scaler.step(optimizer)
+        scaler.update()
+
         total_loss += loss.item()
-
-        # Update progress bar
-        si_snr_db = -loss.item()
         pbar.set_postfix(
-            {"loss": f"{loss.item():.4f}", "SI-SNR": f"{si_snr_db:.2f} dB"}
+            {"loss": f"{loss.item():.4f}", "SI-SNR": f"{-loss.item():.2f} dB"}
         )
 
-    avg_loss = total_loss / num_batches
-    return avg_loss
+    return total_loss / num_batches
 
 
 def validate(model, val_loader, device, epoch):
-    """Validate the model."""
+    """Validate the model with AMP."""
     model.eval()
     total_loss = 0
     num_batches = len(val_loader)
@@ -411,48 +300,35 @@ def validate(model, val_loader, device, epoch):
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Epoch {epoch} [Val]")
         for batch in pbar:
-            # Move to device
             mix = batch["mix"].to(device)
             s1 = batch["s1"].to(device)
             s2 = batch["s2"].to(device)
             s3 = batch["s3"].to(device)
 
-            # Prepare inputs
             batch_size = mix.size(0)
             mix_lengths = torch.full(
                 (batch_size,), mix.size(1), dtype=torch.long, device=device
             )
-
-            speech_ref1 = s1
-            speech_ref2 = s2
-            speech_ref3 = s3
             ref_lengths = mix_lengths.clone()
 
-            # Forward pass
-            loss, stats, weight = model(
-                speech_mix=mix,
-                speech_mix_lengths=mix_lengths,
-                speech_ref1=speech_ref1,
-                speech_ref1_lengths=ref_lengths,
-                speech_ref2=speech_ref2,
-                speech_ref2_lengths=ref_lengths,
-                speech_ref3=speech_ref3,
-                speech_ref3_lengths=ref_lengths,
-            )
+            with torch.amp.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
+                loss, stats, weight = model(
+                    speech_mix=mix,
+                    speech_mix_lengths=mix_lengths,
+                    speech_ref1=s1,
+                    speech_ref1_lengths=ref_lengths,
+                    speech_ref2=s2,
+                    speech_ref2_lengths=ref_lengths,
+                    speech_ref3=s3,
+                    speech_ref3_lengths=ref_lengths,
+                )
 
             total_loss += loss.item()
-
-            # Update progress bar
-            val_si_snr_db = -loss.item()
             pbar.set_postfix(
-                {
-                    "val_loss": f"{loss.item():.4f}",
-                    "val_SI-SNR": f"{val_si_snr_db:.2f} dB",
-                }
+                {"val_loss": f"{loss.item():.4f}", "val_SI-SNR": f"{-loss.item():.2f} dB"}
             )
 
-    avg_loss = total_loss / num_batches
-    return avg_loss
+    return total_loss / num_batches
 
 
 # =============================================================================
@@ -460,20 +336,17 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main():
+def main(resume_from=None, num_epochs=None):
     """Main training function."""
-    # Set random seeds
     random.seed(TRAIN_CONFIG["seed"])
     np.random.seed(TRAIN_CONFIG["seed"])
     torch.manual_seed(TRAIN_CONFIG["seed"])
     if torch.cuda.is_available():
         torch.cuda.manual_seed(TRAIN_CONFIG["seed"])
 
-    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Print transfer learning info
     print("\n" + "=" * 60)
     print("Transfer Learning Configuration")
     print("=" * 60)
@@ -482,43 +355,64 @@ def main():
     print(f"Learning Rate: {TRAIN_CONFIG['learning_rate']} (10x smaller)")
     print("=" * 60)
 
+    # Build utterance-level split from raw dataset
+    print("\nBuilding utterance-level train/dev/test split...")
+    train_utts, dev_utts, test_utts = build_utterance_split(
+        RAW_DIR, seed=TRAIN_CONFIG["seed"], train_ratio=0.8, dev_ratio=0.1
+    )
+
     # Create datasets
     print("\nLoading datasets...")
-    train_dataset = IndonesianMixDataset("train")
-    dev_dataset = IndonesianMixDataset("dev")
-    test_dataset = IndonesianMixDataset("test")
+    train_dataset = DynamicMixDataset(
+        utterances_by_speaker=train_utts,
+        num_speakers=3,
+        target_duration=5.0,
+        target_sr=16000,
+        snr_range=(-5.0, 5.0),
+        epoch_size=28800,
+        gender_balance=True,
+        augment=True,
+    )
+    dev_dataset = IndonesianMixDataset(
+        split="dev", dataset_dir=DATASET_DIR, num_speakers=3, augment=False,
+        target_duration=5.0,
+    )
+    test_dataset = IndonesianMixDataset(
+        split="test", dataset_dir=DATASET_DIR, num_speakers=3, augment=False,
+        target_duration=5.0,
+    )
 
-    # Create data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=TRAIN_CONFIG["batch_size"],
         shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
     )
     dev_loader = DataLoader(
         dev_dataset,
         batch_size=TRAIN_CONFIG["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=TRAIN_CONFIG["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     print(f"✓ Train batches: {len(train_loader)}")
     print(f"✓ Dev batches: {len(dev_loader)}")
     print(f"✓ Test batches: {len(test_loader)}")
 
-    # Build model with transfer learning
     model = build_model(device, use_transfer=True)
 
-    # Optimizer
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=TRAIN_CONFIG["learning_rate"],
@@ -527,7 +421,8 @@ def main():
         weight_decay=TRAIN_CONFIG["weight_decay"],
     )
 
-    # Scheduler
+    scaler = torch.amp.GradScaler("cuda")
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -537,8 +432,25 @@ def main():
         verbose=True,
     )
 
-    # Training loop
     best_val_loss = float("inf")
+    start_epoch = 1
+    target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
+
+    if resume_from is not None:
+        resume_path = project_root / resume_from
+        print(f"\nLoading checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        best_val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss", best_val_loss))
+        start_epoch = ckpt.get("epoch", 0) + 1
+        print(f"✓ Resumed from epoch {start_epoch - 1}.")
+
     patience_counter = 0
     train_losses = []
     val_losses = []
@@ -547,65 +459,62 @@ def main():
     print("Starting Transfer Learning Training")
     print("=" * 60)
 
-    for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
-        # Train
-        train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
+    for epoch in range(start_epoch, target_num_epochs + 1):
+        train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
         train_losses.append(train_loss)
 
-        # Validate
         val_loss = validate(model, dev_loader, device, epoch)
         val_losses.append(val_loss)
 
-        # Scheduler step
         scheduler.step(val_loss)
 
-        # Print progress
         print(
             f"Epoch {epoch:3d}: Train Loss = {train_loss:.4f}, "
             f"Val Loss = {val_loss:.4f}, "
             f"Val SI-SNR = {-val_loss:.2f} dB"
         )
 
-        # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
 
-            # Save checkpoint
-            checkpoint = {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "best_val_loss": best_val_loss,
-                "config": MODEL_CONFIG,
-                "transfer_config": TRANSFER_CONFIG,
-            }
-            torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
-            print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
-        else:
-            patience_counter += 1
-
-        # Early stopping
-        if patience_counter >= TRAIN_CONFIG["patience"]:
-            print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
-            print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
-            break
-
-        # Save periodic checkpoint
-        if epoch % 10 == 0:
-            checkpoint_path = CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth"
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
                     "train_loss": train_loss,
                     "val_loss": val_loss,
+                    "best_val_loss": best_val_loss,
+                    "config": MODEL_CONFIG,
+                    "transfer_config": TRANSFER_CONFIG,
                 },
-                checkpoint_path,
+                CHECKPOINT_DIR / "best_model.pth",
+            )
+            print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
+        else:
+            patience_counter += 1
+
+        if patience_counter >= TRAIN_CONFIG["patience"]:
+            print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
+            break
+
+        if epoch % 10 == 0:
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "best_val_loss": best_val_loss,
+                    "config": MODEL_CONFIG,
+                },
+                CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth",
             )
             print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
@@ -617,7 +526,6 @@ def main():
     # Plot training curves
     plt.figure(figsize=(12, 5))
 
-    # Loss curves
     plt.subplot(1, 2, 1)
     plt.plot(train_losses, label="Train Loss", marker="o", markersize=3)
     plt.plot(val_losses, label="Val Loss", marker="s", markersize=3)
@@ -627,7 +535,6 @@ def main():
     plt.legend()
     plt.grid(True, alpha=0.3)
 
-    # SI-SNR curves
     plt.subplot(1, 2, 2)
     plt.plot([-l for l in train_losses], label="Train SI-SNR", marker="o", markersize=3)
     plt.plot([-l for l in val_losses], label="Val SI-SNR", marker="s", markersize=3)
@@ -641,7 +548,6 @@ def main():
     plt.savefig(CHECKPOINT_DIR / "training_curves.png", dpi=150)
     print(f"✓ Training curves saved")
 
-    # Save config
     with open(CHECKPOINT_DIR / "config.json", "w") as f:
         json.dump(
             {
@@ -658,4 +564,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Train SkiM Attention 3-speaker model with transfer learning"
+    )
+    parser.add_argument("--resume-from", type=str, default=None)
+    parser.add_argument("--num-epochs", type=int, default=None)
+    args = parser.parse_args()
+
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs)

@@ -138,6 +138,15 @@
                                         <option value="train">Train</option>
                                     </select>
                                 </div>
+                                <div class="filter-group" id="speaker-filter-row" style="display:none;">
+                                    <label class="label">Speaker</label>
+                                    <select id="speaker-select" class="select">
+                                        <option value="">Any speaker</option>
+                                    </select>
+                                </div>
+                                <div class="filter-group" style="align-self:flex-end;">
+                                    <button class="btn btn-primary" id="random-sample-btn">&#127922; Random Sample</button>
+                                </div>
                             </div>
                             <div class="samples-grid" id="samples-grid">
                                 <div class="empty-state">
@@ -420,7 +429,12 @@
                     <div class="section-header">
                         <h2>Comparison Results</h2>
                     </div>
-                    <div class="card">
+                    <!-- SI-SNR Bar Chart -->
+                    <div class="card" style="margin-bottom:16px;">
+                        <canvas id="cmp-bar-chart" style="max-height:300px;"></canvas>
+                    </div>
+                    <!-- Metrics Table -->
+                    <div class="card" style="margin-bottom:16px;">
                         <div class="table-container">
                             <table class="data-table" id="cmp-results-table">
                                 <thead>
@@ -428,6 +442,9 @@
                                         <th>Model</th>
                                         <th>Avg SI-SNR (dB)</th>
                                         <th>Std SI-SNR</th>
+                                        <th>Spk1 SI-SNR</th>
+                                        <th>Spk2 SI-SNR</th>
+                                        <th>Spk3 SI-SNR</th>
                                         <th>Avg STOI</th>
                                         <th>Samples</th>
                                     </tr>
@@ -436,6 +453,8 @@
                             </table>
                         </div>
                     </div>
+                    <!-- Per-model separated audio -->
+                    <div id="cmp-audio-section"></div>
                 </section>
             </div>
 
@@ -483,6 +502,7 @@
         <p>Processing...</p>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

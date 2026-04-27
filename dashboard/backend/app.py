@@ -125,6 +125,56 @@ MODEL_CONFIGS = {
             "num_heads": 4,
         },
     },
+    "skim-3spk-transfer": {
+        "path": project_root / "checkpoints" / "3speaker" / "skim-transfer" / "best_model.pth",
+        "num_spk": 3,
+        "separator_class": SkiMSeparator,
+        "config": {
+            "input_dim": 256,
+            "causal": False,
+            "num_spk": 3,
+            "predict_noise": False,
+            "nonlinear": "relu",
+            "layer": 4,
+            "unit": 256,
+            "segment_size": 20,
+            "dropout": 0.1,
+            "mem_type": "hc",
+            "seg_overlap": False,
+        },
+    },
+    "skim-attention-3spk-transfer": {
+        "path": project_root
+        / "checkpoints"
+        / "3speaker"
+        / "skim-attention-transfer"
+        / "best_model.pth",
+        "num_spk": 3,
+        "separator_class": SkiMAttentionSeparator,
+        "config": {
+            "input_dim": 256,
+            "causal": False,
+            "num_spk": 3,
+            "predict_noise": False,
+            "nonlinear": "relu",
+            "layer": 4,
+            "unit": 256,
+            "segment_size": 20,
+            "dropout": 0.1,
+            "mem_type": "hc",
+            "seg_overlap": False,
+            "num_heads": 4,
+        },
+    },
+}
+
+MODEL_DISPLAY_NAMES = {
+    "skim-2spk": "SkiM 2-Spk",
+    "skim-attention-2spk": "SkiM Attention 2-Spk",
+    "skim-3spk": "SkiM 3-Spk",
+    "skim-attention-3spk": "SkiM Attention 3-Spk",
+    "skim-3spk-transfer": "SkiM 3-Spk (Transfer)",
+    "skim-attention-3spk-transfer": "SkiM Attention 3-Spk (Transfer)",
 }
 
 # Global model cache
@@ -335,56 +385,38 @@ def get_dataset_samples(dataset_id):
     return jsonify({"samples": samples, "split": split, "total": len(mix_files)})
 
 
-@app.route("/api/evaluate", methods=["POST"])
-def evaluate():
-    """Evaluate audio with selected model."""
-    data = request.json
-    model_key = data.get("model")
-    audio_path = data.get("audio_path")
-
-    if not model_key or not audio_path:
-        return jsonify({"error": "Missing model or audio_path"}), 400
-
+def _run_evaluate(model_key, audio_path):
+    """Shared evaluation logic used by /api/evaluate and /api/evaluate/random."""
+    from itertools import permutations as _perms
     try:
-        # Load model
         model_info = get_model(model_key)
         model = model_info["model"]
         num_spk = model_info["num_spk"]
         device = model_info["device"]
 
-        # Load audio
         audio, sr = sf.read(audio_path)
         if len(audio.shape) > 1:
             audio = np.mean(audio, axis=1)
 
-        # Convert to tensor
         audio_tensor = torch.FloatTensor(audio).unsqueeze(0).to(device)
         lengths = torch.LongTensor([len(audio)]).to(device)
 
-        # Separate using forward_enhance (no PIT reordering)
         with torch.no_grad():
             speech_pre, _, _, _ = model.forward_enhance(audio_tensor, lengths)
             separated = [s.squeeze(0).cpu().numpy() for s in speech_pre[:num_spk]]
 
-        # Normalize output RMS to match input (relu masks are unbounded)
         separated = normalize_audio(separated, audio)
 
-        # Save separated audio
         results = []
         for i, sep_audio in enumerate(separated):
-            output_path = (
-                UPLOAD_FOLDER / f"separated_spk{i + 1}_{Path(audio_path).stem}.wav"
-            )
+            output_path = UPLOAD_FOLDER / f"separated_spk{i + 1}_{Path(audio_path).stem}.wav"
             sf.write(output_path, sep_audio, sr)
-            results.append(
-                {
-                    "speaker": i + 1,
-                    "path": str(output_path),
-                    "url": f"/api/audio/{output_path.name}",
-                }
-            )
+            results.append({
+                "speaker": i + 1,
+                "path": str(output_path),
+                "url": f"/api/audio/{output_path.name}",
+            })
 
-        # Calculate metrics with best-permutation matching
         metrics = {}
         dataset_path = Path(audio_path).parent.parent
         refs = []
@@ -394,38 +426,44 @@ def evaluate():
                 gt_audio, _ = sf.read(gt_path)
                 if len(gt_audio.shape) > 1:
                     gt_audio = np.mean(gt_audio, axis=1)
-                refs.append((i, gt_audio))
+                refs.append(gt_audio)
 
         if len(refs) == num_spk:
-            from itertools import permutations
-            ref_audios = [r[1] for r in refs]
             best_perm = max(
-                permutations(range(num_spk)),
-                key=lambda p: sum(calculate_si_snr(separated[p[j]], ref_audios[j]) for j in range(num_spk))
+                _perms(range(num_spk)),
+                key=lambda p: sum(calculate_si_snr(separated[p[j]], refs[j]) for j in range(num_spk))
             )
             for j in range(num_spk):
-                sep_audio = separated[best_perm[j]]
-                gt_audio = ref_audios[j]
-                si_snr = calculate_si_snr(sep_audio, gt_audio)
-                stoi_score = calculate_stoi(sep_audio, gt_audio, sr)
+                si_snr = calculate_si_snr(separated[best_perm[j]], refs[j])
+                stoi_score = calculate_stoi(separated[best_perm[j]], refs[j], sr)
                 metrics[f"spk{j + 1}"] = {
                     "si_snr": round(float(si_snr), 2),
                     "stoi": round(float(stoi_score), 3) if stoi_score else None,
                 }
 
-        return jsonify(
-            {
-                "success": True,
-                "separated": results,
-                "metrics": metrics,
-                "num_speakers": num_spk,
-            }
-        )
+        return jsonify({
+            "success": True,
+            "sample_id": Path(audio_path).stem,
+            "audio_path": audio_path,
+            "separated": results,
+            "metrics": metrics,
+            "num_speakers": num_spk,
+        })
 
     except Exception as e:
         import traceback
-
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/api/evaluate", methods=["POST"])
+def evaluate():
+    """Evaluate audio with selected model."""
+    data = request.json
+    model_key = data.get("model")
+    audio_path = data.get("audio_path")
+    if not model_key or not audio_path:
+        return jsonify({"error": "Missing model or audio_path"}), 400
+    return _run_evaluate(model_key, audio_path)
 
 
 @app.route("/api/audio/<filename>")
@@ -565,51 +603,135 @@ def evaluate_batch():
 
 @app.route("/api/training", methods=["GET"])
 def get_training_info():
-    """Return training config and loss history for all checkpoint dirs."""
-    checkpoints_root = project_root / "checkpoints"
-    results = []
+    """Return training info keyed by model_key for the frontend training page."""
+    results = {}
 
     for model_key, cfg in MODEL_CONFIGS.items():
         ckpt_dir = cfg["path"].parent
         entry = {
-            "model": model_key,
-            "checkpoint_dir": str(ckpt_dir),
+            "name": MODEL_DISPLAY_NAMES.get(model_key, model_key),
             "best_model_exists": cfg["path"].exists(),
-            "config": None,
             "best_epoch": None,
-            "best_val_si_snr": None,
+            "best_val_loss": None,
+            "best_si_snr": None,
+            "has_curves": (ckpt_dir / "training_curves.png").exists(),
             "checkpoints": [],
         }
 
-        # Load config.json saved by training script
         config_path = ckpt_dir / "config.json"
         if config_path.exists():
             with open(config_path) as f:
                 saved = json.load(f)
-            entry["config"] = saved.get("train_config")
-            entry["best_val_si_snr"] = saved.get("best_si_snr")
+            entry["best_si_snr"] = saved.get("best_si_snr")
+            if entry["best_si_snr"] is not None:
+                entry["best_val_loss"] = -entry["best_si_snr"]
 
-        # Best model metadata
         if cfg["path"].exists():
             try:
-                ckpt = torch.load(cfg["path"], map_location="cpu")
+                ckpt = torch.load(cfg["path"], map_location="cpu", weights_only=False)
                 entry["best_epoch"] = ckpt.get("epoch")
-                if entry["best_val_si_snr"] is None:
-                    val_loss = ckpt.get("val_loss")
+                if entry["best_si_snr"] is None:
+                    val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss"))
                     if val_loss is not None:
-                        entry["best_val_si_snr"] = round(-float(val_loss), 2)
+                        entry["best_val_loss"] = round(float(val_loss), 4)
+                        entry["best_si_snr"] = round(-float(val_loss), 2)
             except Exception:
                 pass
 
-        # List periodic checkpoints
         if ckpt_dir.exists():
             entry["checkpoints"] = sorted(
                 p.name for p in ckpt_dir.glob("checkpoint_epoch_*.pth")
             )
 
-        results.append(entry)
+        results[model_key] = entry
 
-    return jsonify({"training": results})
+    return jsonify(results)
+
+
+@app.route("/api/dataset/<dataset_id>/speakers", methods=["GET"])
+def get_speakers(dataset_id):
+    """Return unique speaker IDs found in a dataset split's metadata."""
+    split = request.args.get("split", "test")
+    dataset_dir = project_root / "dataset" / "synthetic"
+    dataset_name = next(
+        (d.name for d in dataset_dir.iterdir() if d.is_dir() and d.name.lower() == dataset_id),
+        None,
+    )
+    if dataset_name is None:
+        return jsonify({"error": f"Dataset '{dataset_id}' not found"}), 404
+
+    metadata_path = dataset_dir / dataset_name / split / "metadata.json"
+    if not metadata_path.exists():
+        return jsonify({"speakers": []})
+
+    with open(metadata_path) as f:
+        meta = json.load(f)
+
+    speakers = set()
+    samples = meta if isinstance(meta, list) else meta.get("samples", [])
+    for s in samples:
+        for key in ("speakers", "speaker_ids", "spk_ids"):
+            if key in s:
+                for spk in s[key]:
+                    speakers.add(spk)
+                break
+
+    return jsonify({"speakers": sorted(speakers)})
+
+
+@app.route("/api/evaluate/random", methods=["POST"])
+def evaluate_random():
+    """Pick a random sample from a dataset split and evaluate it."""
+    import random as _random
+    data = request.json
+    model_key = data.get("model")
+    dataset_id = data.get("dataset")
+    split = data.get("split", "test")
+    speaker_filter = data.get("speaker")
+
+    if not model_key or not dataset_id:
+        return jsonify({"error": "Missing model or dataset"}), 400
+
+    dataset_dir = project_root / "dataset" / "synthetic"
+    dataset_name = next(
+        (d.name for d in dataset_dir.iterdir() if d.is_dir() and d.name.lower() == dataset_id),
+        None,
+    )
+    if dataset_name is None:
+        return jsonify({"error": f"Dataset '{dataset_id}' not found"}), 404
+
+    mix_dir = dataset_dir / dataset_name / split / "mix"
+    if not mix_dir.exists():
+        return jsonify({"error": f"No mix directory for split '{split}'"}), 404
+
+    candidates = list(mix_dir.glob("*.wav"))
+
+    # Filter by speaker if requested and metadata exists
+    if speaker_filter and candidates:
+        metadata_path = dataset_dir / dataset_name / split / "metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                meta = json.load(f)
+            samples = meta if isinstance(meta, list) else meta.get("samples", [])
+            matched = set()
+            for s in samples:
+                for key in ("speakers", "speaker_ids", "spk_ids"):
+                    if key in s and speaker_filter in s[key]:
+                        sid = s.get("id") or s.get("filename") or s.get("stem")
+                        if sid:
+                            matched.add(Path(sid).stem if "." in str(sid) else sid)
+                        break
+            filtered = [f for f in candidates if f.stem in matched]
+            if filtered:
+                candidates = filtered
+
+    if not candidates:
+        return jsonify({"error": "No samples found"}), 404
+
+    chosen = _random.choice(candidates)
+
+    # Delegate to the same logic as /api/evaluate by constructing an internal request
+    return _run_evaluate(model_key, str(chosen))
 
 
 @app.route("/api/training/<model_key>/image")

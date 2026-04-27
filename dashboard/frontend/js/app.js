@@ -10,7 +10,9 @@ const state = {
     selectedSample: null,
     models: [],
     datasets: [],
-    evaluationResults: null
+    evaluationResults: null,
+    cmpChart: null,          // Chart.js instance for comparison bar chart
+    cmpAllResults: {},       // modelId -> full evaluate-batch response
 };
 
 // API base URL
@@ -24,6 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadModels();
     loadDatasets();
     loadTrainingInfo();
+    initRandomSampleButton();
 });
 
 // Navigation
@@ -233,13 +236,16 @@ async function loadDatasets() {
             const datasetId = e.target.value;
             if (datasetId) {
                 state.selectedDataset = datasetId;
-                loadSamples(datasetId, document.getElementById('split-select').value);
+                const split = document.getElementById('split-select').value;
+                loadSamples(datasetId, split);
+                loadSpeakers(datasetId, split);
             }
         });
 
         document.getElementById('split-select').addEventListener('change', (e) => {
             if (state.selectedDataset) {
                 loadSamples(state.selectedDataset, e.target.value);
+                loadSpeakers(state.selectedDataset, e.target.value);
             }
         });
 
@@ -988,11 +994,11 @@ async function loadTrainingInfo() {
         Object.entries(data).forEach(([key, info]) => {
             const card = document.createElement('div');
             card.className = 'stat-card';
-            const epoch = info.best_epoch ?? info.last_epoch ?? '—';
-            const loss = info.best_val_loss != null ? info.best_val_loss.toFixed(4) : '—';
+            const epoch = info.best_epoch ?? '—';
+            const siSnr = info.best_si_snr != null ? info.best_si_snr.toFixed(2) + ' dB' : '—';
             card.innerHTML = `
-                <div class="stat-value">${loss}</div>
-                <div class="stat-label">${info.name ?? key}<br><small>Best loss @ epoch ${epoch}</small></div>
+                <div class="stat-value">${siSnr}</div>
+                <div class="stat-label">${info.name ?? key}<br><small>Best SI-SNR @ epoch ${epoch}</small></div>
             `;
             grid.appendChild(card);
 
@@ -1033,23 +1039,18 @@ async function runComparison() {
     const split = document.getElementById('cmp-split-select').value;
     const numSamples = parseInt(document.getElementById('cmp-num-samples').value);
 
-    if (!datasetId) {
-        alert('Please select a dataset');
-        return;
-    }
+    if (!datasetId) { alert('Please select a dataset'); return; }
 
     const checked = Array.from(
         document.querySelectorAll('#cmp-model-checkboxes input[type=checkbox]:checked')
     ).map(cb => cb.value);
 
-    if (checked.length === 0) {
-        alert('Please select at least one model');
-        return;
-    }
+    if (checked.length === 0) { alert('Please select at least one model'); return; }
 
     showLoading(true);
-    const tbody = document.querySelector('#cmp-results-table tbody');
-    tbody.innerHTML = '';
+    state.cmpAllResults = {};
+    document.querySelector('#cmp-results-table tbody').innerHTML = '';
+    document.getElementById('cmp-audio-section').innerHTML = '';
 
     try {
         for (const modelId of checked) {
@@ -1059,24 +1060,11 @@ async function runComparison() {
                 body: JSON.stringify({ model: modelId, dataset: datasetId, split, num_samples: numSamples })
             });
             const data = await response.json();
-
-            const row = document.createElement('tr');
-            if (data.success) {
-                const m = data.average_metrics;
-                row.innerHTML = `
-                    <td>${modelId}</td>
-                    <td>${m.avg_si_snr ?? '—'}</td>
-                    <td>${m.std_si_snr ?? '—'}</td>
-                    <td>${m.avg_stoi ?? '—'}</td>
-                    <td>${data.num_evaluated}</td>
-                `;
-            } else {
-                row.innerHTML = `<td>${modelId}</td><td colspan="4" style="color:var(--error)">${data.error}</td>`;
-            }
-            tbody.appendChild(row);
+            state.cmpAllResults[modelId] = data;
         }
 
         document.getElementById('cmp-results-section').style.display = 'block';
+        renderComparisonResults(state.cmpAllResults);
         document.getElementById('cmp-results-section').scrollIntoView({ behavior: 'smooth' });
     } catch (error) {
         console.error('Comparison error:', error);
@@ -1084,6 +1072,207 @@ async function runComparison() {
     } finally {
         showLoading(false);
     }
+}
+
+function renderComparisonResults(allResults) {
+    const modelIds = Object.keys(allResults);
+    const tbody = document.querySelector('#cmp-results-table tbody');
+    tbody.innerHTML = '';
+
+    const labels = [];
+    const avgSiSnrs = [];
+    const bgColors = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899'];
+
+    modelIds.forEach((modelId, idx) => {
+        const data = allResults[modelId];
+        if (!data.success) {
+            const row = document.createElement('tr');
+            row.innerHTML = `<td>${modelId}</td><td colspan="7" style="color:var(--error)">${data.error}</td>`;
+            tbody.appendChild(row);
+            return;
+        }
+
+        const m = data.average_metrics;
+        labels.push(modelId);
+        avgSiSnrs.push(m.avg_si_snr ?? 0);
+
+        // Compute per-speaker averages across samples
+        const spkSums = {};
+        const spkCounts = {};
+        data.results.forEach(r => {
+            Object.entries(r.speakers).forEach(([spk, metrics]) => {
+                spkSums[spk] = (spkSums[spk] || 0) + metrics.si_snr;
+                spkCounts[spk] = (spkCounts[spk] || 0) + 1;
+            });
+        });
+        const spkAvg = (k) => spkCounts[k] ? (spkSums[k] / spkCounts[k]).toFixed(2) : '—';
+
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${bgColors[idx % bgColors.length]};margin-right:6px;"></span>${modelId}</td>
+            <td>${m.avg_si_snr ?? '—'}</td>
+            <td>${m.std_si_snr ?? '—'}</td>
+            <td>${spkAvg('spk1')}</td>
+            <td>${spkAvg('spk2')}</td>
+            <td>${spkAvg('spk3')}</td>
+            <td>${m.avg_stoi ?? '—'}</td>
+            <td>${data.num_evaluated}</td>
+        `;
+        tbody.appendChild(row);
+    });
+
+    // Draw bar chart
+    const canvas = document.getElementById('cmp-bar-chart');
+    if (canvas && typeof Chart !== 'undefined') {
+        if (state.cmpChart) state.cmpChart.destroy();
+        state.cmpChart = new Chart(canvas.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Avg SI-SNR (dB)',
+                    data: avgSiSnrs,
+                    backgroundColor: bgColors.slice(0, labels.length),
+                    borderRadius: 6,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { display: false },
+                    title: { display: true, text: 'Average SI-SNR by Model' }
+                },
+                scales: {
+                    y: { title: { display: true, text: 'SI-SNR (dB)' } }
+                }
+            }
+        });
+    }
+
+    // Per-model separated audio (use first result sample)
+    renderComparisonAudio(allResults, bgColors);
+}
+
+async function renderComparisonAudio(allResults, bgColors) {
+    const section = document.getElementById('cmp-audio-section');
+    section.innerHTML = '<h3 style="margin:16px 0 8px">Separated Audio per Model</h3>';
+
+    const modelIds = Object.keys(allResults);
+    for (let idx = 0; idx < modelIds.length; idx++) {
+        const modelId = modelIds[idx];
+        const data = allResults[modelId];
+        if (!data.success || !data.results.length) continue;
+
+        // Evaluate one random sample to get separated audio URLs for playback
+        const evalResp = await fetch(`${API_BASE}/evaluate/random`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: modelId,
+                dataset: document.getElementById('cmp-dataset-select').value,
+                split: document.getElementById('cmp-split-select').value,
+            })
+        });
+        const evalData = await evalResp.json();
+        if (!evalData.success || !evalData.separated) continue;
+
+        const color = bgColors[idx % bgColors.length];
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.style.cssText = 'margin-bottom:12px;';
+
+        let audioHtml = evalData.separated.map((sep, i) => `
+            <div style="margin-bottom:8px;">
+                <div style="font-size:12px;color:${color};margin-bottom:4px;">Speaker ${sep.speaker}</div>
+                <audio controls src="${sep.url}" style="width:100%;"></audio>
+                <canvas id="cmp-wave-${idx}-${i}" style="width:100%;height:40px;display:block;margin-top:4px;"></canvas>
+            </div>
+        `).join('');
+
+        card.innerHTML = `
+            <div style="border-left:3px solid ${color};padding-left:12px;">
+                <strong>${modelId}</strong>
+                <div style="margin-top:8px;">${audioHtml}</div>
+            </div>
+        `;
+        section.appendChild(card);
+
+        // Draw waveforms
+        evalData.separated.forEach((sep, i) => {
+            const canvas = document.getElementById(`cmp-wave-${idx}-${i}`);
+            if (canvas) setTimeout(() => drawWaveformPreview(canvas, sep.path || sep.url), 50);
+        });
+    }
+}
+
+// Load speakers for a dataset/split
+async function loadSpeakers(datasetId, split) {
+    try {
+        const response = await fetch(`${API_BASE}/dataset/${datasetId}/speakers?split=${split}`);
+        const data = await response.json();
+        const select = document.getElementById('speaker-select');
+        const row = document.getElementById('speaker-filter-row');
+        if (!select || !row) return;
+
+        select.innerHTML = '<option value="">Any speaker</option>';
+        if (data.speakers && data.speakers.length > 0) {
+            data.speakers.forEach(spk => {
+                const opt = document.createElement('option');
+                opt.value = spk;
+                opt.textContent = spk;
+                select.appendChild(opt);
+            });
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    } catch (e) {
+        console.error('Error loading speakers:', e);
+    }
+}
+
+// Random sample button
+function initRandomSampleButton() {
+    const btn = document.getElementById('random-sample-btn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+        const modelId = state.selectedModel;
+        const datasetId = document.getElementById('dataset-select').value;
+        const split = document.getElementById('split-select').value;
+        const speaker = document.getElementById('speaker-select')?.value || '';
+
+        if (!modelId) { alert('Please select a model first'); return; }
+        if (!datasetId) { alert('Please select a dataset first'); return; }
+
+        showLoading(true);
+        try {
+            const response = await fetch(`${API_BASE}/evaluate/random`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: modelId, dataset: datasetId, split, speaker: speaker || undefined })
+            });
+            const data = await response.json();
+            showLoading(false);
+
+            if (data.success) {
+                state.selectedSample = {
+                    id: data.sample_id,
+                    mix: data.audio_path,
+                    audioUrl: data.audio_path,
+                };
+                // Show the audio section with the mixture
+                const audioUrl = `/api/audio/dataset/${data.audio_path.replace(/^.*dataset\//, '')}`;
+                showSelectedAudio(data.sample_id, audioUrl, data.audio_path);
+                state.evaluationResults = data;
+                showResults(data);
+            } else {
+                alert('Error: ' + data.error);
+            }
+        } catch (error) {
+            showLoading(false);
+            alert('Error: ' + error.message);
+        }
+    });
 }
 
 // Loading overlay
