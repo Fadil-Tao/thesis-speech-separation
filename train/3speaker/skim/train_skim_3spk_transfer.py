@@ -118,7 +118,7 @@ def load_pretrained_weights(model, pretrained_path, device):
         return model
 
     print(f"\n📥 Loading pretrained weights from: {pretrained_path}")
-    checkpoint = torch.load(pretrained_full_path, map_location=device)
+    checkpoint = torch.load(pretrained_full_path, map_location=device, weights_only=False)
     pretrained_dict = checkpoint["model_state_dict"]
     model_dict = model.state_dict()
 
