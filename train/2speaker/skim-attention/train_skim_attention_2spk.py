@@ -19,6 +19,7 @@ import os
 import sys
 import json
 import random
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -344,7 +345,7 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main():
+def main(resume_from=None, num_epochs=None):
     """Main training function."""
     # Set random seeds
     random.seed(TRAIN_CONFIG["seed"])
@@ -439,16 +440,37 @@ def main():
 
     # Training loop
     best_val_loss = float("inf")
+    start_epoch = 1
+    target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
+
+    if resume_from is not None:
+        resume_path = CHECKPOINT_DIR / resume_from
+        print(f"\nLoading checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        best_val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss", best_val_loss))
+        start_epoch = ckpt.get("epoch", 0) + 1
+        print(f"✓ Resumed from epoch {start_epoch - 1}.")
+
     patience_counter = 0
     train_losses = []
     val_losses = []
+    if resume_from is not None and "train_losses" in ckpt:
+        train_losses = ckpt["train_losses"]
+        val_losses = ckpt["val_losses"]
 
     print("\n" + "=" * 60)
     print("Starting Training")
     print("=" * 60)
 
     try:
-        for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
+        for epoch in range(start_epoch, target_num_epochs + 1):
             train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
             train_losses.append(train_loss)
 
@@ -533,4 +555,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train SkiM Attention 2-Speaker model")
+    parser.add_argument("--resume-from", type=str, default=None,
+                        help="Checkpoint filename to resume from (e.g. checkpoint_epoch_30.pth)")
+    parser.add_argument("--num-epochs", type=int, default=None,
+                        help="Total number of epochs to train (overrides config)")
+    args = parser.parse_args()
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs)

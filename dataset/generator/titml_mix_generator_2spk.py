@@ -532,6 +532,14 @@ def main():
              '(all speakers in every split, non-overlapping utterances). '
              'Default: utterance'
     )
+    parser.add_argument(
+        '--only-splits',
+        type=str,
+        nargs='+',
+        choices=['train', 'dev', 'test'],
+        default=None,
+        help='Only generate specified splits (e.g. --only-splits dev test)'
+    )
 
     args = parser.parse_args()
 
@@ -576,6 +584,8 @@ def main():
         seed=args.seed
     )
 
+    only_splits = set(args.only_splits) if args.only_splits else {'train', 'dev', 'test'}
+
     if args.split_mode == 'utterance':
         # Utterance-level split: all speakers in every split,
         # non-overlapping utterances per speaker
@@ -591,21 +601,21 @@ def main():
             num_mixtures=train_mixtures,
             target_duration=args.target_duration,
             gender_balance=True
-        )
+        ) if 'train' in only_splits else train_mixtures
         dev_count = generator.generate_mixtures_from_utterances(
             utterances_by_speaker=dev_utts,
             split_name='dev',
             num_mixtures=dev_mixtures,
             target_duration=args.target_duration,
             gender_balance=True
-        )
+        ) if 'dev' in only_splits else dev_mixtures
         test_count = generator.generate_mixtures_from_utterances(
             utterances_by_speaker=test_utts,
             split_name='test',
             num_mixtures=test_mixtures,
             target_duration=args.target_duration,
             gender_balance=True
-        )
+        ) if 'test' in only_splits else test_mixtures
     else:
         # Speaker-level split (original behaviour)
         train_spk, dev_spk, test_spk = generator.split_speakers(
@@ -620,21 +630,21 @@ def main():
             num_mixtures=train_mixtures,
             target_duration=args.target_duration,
             gender_balance=True
-        )
+        ) if 'train' in only_splits else train_mixtures
         dev_count = generator.generate_mixtures(
             speaker_list=dev_spk,
             split_name='dev',
             num_mixtures=dev_mixtures,
             target_duration=args.target_duration,
             gender_balance=True
-        )
+        ) if 'dev' in only_splits else dev_mixtures
         test_count = generator.generate_mixtures(
             speaker_list=test_spk,
             split_name='test',
             num_mixtures=test_mixtures,
             target_duration=args.target_duration,
             gender_balance=True
-        )
+        ) if 'test' in only_splits else test_mixtures
 
     # Generate comprehensive dataset info
     generator.generate_dataset_info(train_count, dev_count, test_count, args.target_duration)
