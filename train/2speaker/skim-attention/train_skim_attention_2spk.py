@@ -94,7 +94,6 @@ TRAIN_CONFIG = {
     "learning_rate": 1e-3,
     "weight_decay": 1e-5,
     "gradient_clip": 5.0,
-    "patience": 20,  # Increased from 10 to handle noisy val curves
     "seed": 42,
 }
 
@@ -190,8 +189,23 @@ def build_model(device):
 # =============================================================================
 
 
+def save_training_history(train_losses, val_losses, out_dir):
+    """Save per-epoch loss history to a lightweight JSON file."""
+    with open(out_dir / "training_history.json", "w") as f:
+        json.dump({"train_losses": train_losses, "val_losses": val_losses}, f)
+
+
+def load_training_history(out_dir):
+    """Load per-epoch loss history from JSON if it exists."""
+    history_path = out_dir / "training_history.json"
+    if history_path.exists():
+        with open(history_path) as f:
+            data = json.load(f)
+        return data.get("train_losses", []), data.get("val_losses", [])
+    return [], []
+
+
 def save_training_curves(train_losses, val_losses, out_dir):
-    """Save loss and SI-SNR curves. Called after every checkpoint and on interrupt."""
     if not train_losses:
         return
     plt.figure(figsize=(12, 5))
@@ -458,12 +472,15 @@ def main(resume_from=None, num_epochs=None):
         start_epoch = ckpt.get("epoch", 0) + 1
         print(f"✓ Resumed from epoch {start_epoch - 1}.")
 
-    patience_counter = 0
-    train_losses = []
-    val_losses = []
-    if resume_from is not None and "train_losses" in ckpt:
+    # Load full per-epoch history from JSON (preferred over checkpoint lists)
+    train_losses, val_losses = load_training_history(CHECKPOINT_DIR)
+    if not train_losses and resume_from is not None and "train_losses" in ckpt:
         train_losses = ckpt["train_losses"]
         val_losses = ckpt["val_losses"]
+    # Truncate history to resume point so the graph doesn't show stale epochs from a prior run
+    if start_epoch > 1 and len(train_losses) >= start_epoch - 1:
+        train_losses = train_losses[:start_epoch - 1]
+        val_losses = val_losses[:start_epoch - 1]
 
     print("\n" + "=" * 60)
     print("Starting Training")
@@ -487,7 +504,6 @@ def main(resume_from=None, num_epochs=None):
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                patience_counter = 0
                 torch.save(
                     {
                         "epoch": epoch,
@@ -505,13 +521,6 @@ def main(resume_from=None, num_epochs=None):
                     CHECKPOINT_DIR / "best_model.pth",
                 )
                 print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
-            else:
-                patience_counter += 1
-
-            if patience_counter >= TRAIN_CONFIG["patience"]:
-                print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
-                print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
-                break
 
             if epoch % 10 == 0:
                 checkpoint_path = CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth"
@@ -531,6 +540,7 @@ def main(resume_from=None, num_epochs=None):
                 print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
             save_training_curves(train_losses, val_losses, CHECKPOINT_DIR)
+            save_training_history(train_losses, val_losses, CHECKPOINT_DIR)
 
     except KeyboardInterrupt:
         print("\n⚠️ Training interrupted by user")

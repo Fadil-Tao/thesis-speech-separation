@@ -11,3 +11,10 @@ __*
 **/__pycache__/
 *.pyc
 **/*.pyc
+*.db
+=0.1.4
+**/=0.1.4
+**/**/=0.1.4
+notebooks/
+notebooks-example
+.jupyter/

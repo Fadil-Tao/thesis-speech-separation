@@ -93,7 +93,6 @@ TRAIN_CONFIG = {
     "learning_rate": 1e-3,
     "weight_decay": 1e-5,
     "gradient_clip": 5.0,
-    "patience": 20,  # Increased from 10 to handle noisy val curves
     "seed": 42,
 }
 
@@ -188,6 +187,22 @@ def build_model(device):
 # =============================================================================
 # Training Functions
 # =============================================================================
+
+
+def save_training_history(train_losses, val_losses, out_dir):
+    """Save per-epoch loss history to a lightweight JSON file."""
+    with open(out_dir / "training_history.json", "w") as f:
+        json.dump({"train_losses": train_losses, "val_losses": val_losses}, f)
+
+
+def load_training_history(out_dir):
+    """Load per-epoch loss history from JSON if it exists."""
+    history_path = out_dir / "training_history.json"
+    if history_path.exists():
+        with open(history_path) as f:
+            data = json.load(f)
+        return data.get("train_losses", []), data.get("val_losses", [])
+    return [], []
 
 
 def save_training_curves(train_losses, val_losses, out_dir):
@@ -448,9 +463,9 @@ def main():
 
     # Training loop
     best_val_loss = float("inf")
-    patience_counter = 0
-    train_losses = []
-    val_losses = []
+
+    # Load full per-epoch history from JSON (preferred over checkpoint lists)
+    train_losses, val_losses = load_training_history(CHECKPOINT_DIR)
 
     print("\n" + "=" * 60)
     print("Starting Training")
@@ -474,7 +489,6 @@ def main():
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                patience_counter = 0
                 torch.save(
                     {
                         "epoch": epoch,
@@ -492,13 +506,6 @@ def main():
                     CHECKPOINT_DIR / "best_model.pth",
                 )
                 print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
-            else:
-                patience_counter += 1
-
-            if patience_counter >= TRAIN_CONFIG["patience"]:
-                print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
-                print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
-                break
 
             if epoch % 10 == 0:
                 checkpoint_path = CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth"
@@ -518,6 +525,7 @@ def main():
                 print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
             save_training_curves(train_losses, val_losses, CHECKPOINT_DIR)
+            save_training_history(train_losses, val_losses, CHECKPOINT_DIR)
 
     except KeyboardInterrupt:
         print("\n⚠️ Training interrupted by user")

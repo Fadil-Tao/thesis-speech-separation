@@ -1406,13 +1406,13 @@ function initRandomSampleButton() {
             showLoading(false);
 
             if (data.success) {
+                const match = data.audio_path.match(/dataset\/synthetic\/.*/);
+                const audioUrl = match ? `/api/audio/dataset/${match[0]}` : data.audio_path;
                 state.selectedSample = {
                     id: data.sample_id,
                     mix: data.audio_path,
-                    audioUrl: data.audio_path,
+                    audioUrl: audioUrl,
                 };
-                // Show the audio section with the mixture
-                const audioUrl = `/api/audio/dataset/${data.audio_path.replace(/^.*dataset\//, '')}`;
                 showSelectedAudio(data.sample_id, audioUrl, data.audio_path);
                 state.evaluationResults = data;
                 showResults(data);

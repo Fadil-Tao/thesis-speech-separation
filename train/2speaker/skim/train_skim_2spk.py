@@ -18,6 +18,7 @@ The script will:
 import os
 import sys
 import json
+import argparse
 import random
 import numpy as np
 import torch
@@ -97,7 +98,6 @@ TRAIN_CONFIG = {
     "learning_rate": 1e-3,
     "weight_decay": 1e-5,
     "gradient_clip": 5.0,
-    "patience": 20,  # Increased from 10 to handle noisy val curves
     "seed": 42,
 }
 
@@ -190,8 +190,23 @@ def build_model(device):
 # =============================================================================
 
 
+def save_training_history(train_losses, val_losses, out_dir):
+    """Save per-epoch loss history to a lightweight JSON file."""
+    with open(out_dir / "training_history.json", "w") as f:
+        json.dump({"train_losses": train_losses, "val_losses": val_losses}, f)
+
+
+def load_training_history(out_dir):
+    """Load per-epoch loss history from JSON if it exists."""
+    history_path = out_dir / "training_history.json"
+    if history_path.exists():
+        with open(history_path) as f:
+            data = json.load(f)
+        return data.get("train_losses", []), data.get("val_losses", [])
+    return [], []
+
+
 def save_training_curves(train_losses, val_losses, out_dir):
-    """Save loss and SI-SNR curves. Called after every checkpoint and on interrupt."""
     if not train_losses:
         return
     plt.figure(figsize=(12, 5))
@@ -345,7 +360,7 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main():
+def main(resume_from=None, num_epochs=None):
     """Main training function."""
     # Set random seeds
     random.seed(TRAIN_CONFIG["seed"])
@@ -440,16 +455,41 @@ def main():
 
     # Training loop
     best_val_loss = float("inf")
-    patience_counter = 0
-    train_losses = []
-    val_losses = []
+    start_epoch = 1
+    target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
+
+    if resume_from is not None:
+        resume_path = CHECKPOINT_DIR / resume_from
+        print(f"\nLoading checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        best_val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss", best_val_loss))
+        start_epoch = ckpt.get("epoch", 0) + 1
+        print(f"✓ Resumed from epoch {start_epoch - 1}.")
+
+    # Load full per-epoch history from JSON (preferred over checkpoint lists)
+    train_losses, val_losses = load_training_history(CHECKPOINT_DIR)
+    if not train_losses and resume_from is not None:
+        ckpt_ref = ckpt if resume_from is not None else {}
+        train_losses = ckpt_ref.get("train_losses", [])
+        val_losses = ckpt_ref.get("val_losses", [])
+    # Truncate history to resume point so the graph doesn't show stale epochs from a prior run
+    if start_epoch > 1 and len(train_losses) >= start_epoch - 1:
+        train_losses = train_losses[:start_epoch - 1]
+        val_losses = val_losses[:start_epoch - 1]
 
     print("\n" + "=" * 60)
     print("Starting Training")
     print("=" * 60)
 
     try:
-        for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
+        for epoch in range(start_epoch, target_num_epochs + 1):
             train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
             train_losses.append(train_loss)
 
@@ -466,7 +506,6 @@ def main():
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                patience_counter = 0
                 torch.save(
                     {
                         "epoch": epoch,
@@ -484,13 +523,6 @@ def main():
                     CHECKPOINT_DIR / "best_model.pth",
                 )
                 print(f"  ✓ Best model saved (SI-SNR: {-val_loss:.2f} dB)")
-            else:
-                patience_counter += 1
-
-            if patience_counter >= TRAIN_CONFIG["patience"]:
-                print(f"\n⚠️ Early stopping triggered after {epoch} epochs")
-                print(f"Best validation SI-SNR: {-best_val_loss:.2f} dB")
-                break
 
             if epoch % 10 == 0:
                 checkpoint_path = CHECKPOINT_DIR / f"checkpoint_epoch_{epoch}.pth"
@@ -510,6 +542,7 @@ def main():
                 print(f"  ✓ Checkpoint saved: epoch_{epoch}.pth")
 
             save_training_curves(train_losses, val_losses, CHECKPOINT_DIR)
+            save_training_history(train_losses, val_losses, CHECKPOINT_DIR)
 
     except KeyboardInterrupt:
         print("\n⚠️ Training interrupted by user")
@@ -534,4 +567,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train SkiM 2-Speaker model")
+    parser.add_argument("--resume-from", type=str, default=None,
+                        help="Checkpoint filename to resume from (e.g. checkpoint_epoch_30.pth)")
+    parser.add_argument("--num-epochs", type=int, default=None,
+                        help="Total number of epochs to train (overrides config)")
+    args = parser.parse_args()
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs)
