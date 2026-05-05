@@ -166,11 +166,83 @@ MODEL_CONFIGS = {
             "num_heads": 4,
         },
     },
+    "skim-attention-2spk-v2a": {
+        "path": project_root
+        / "checkpoints"
+        / "2speaker"
+        / "skim-attention-v2a"
+        / "best_model.pth",
+        "num_spk": 2,
+        "separator_class": SkiMAttentionSeparator,
+        "config": {
+            "input_dim": 256,
+            "causal": False,
+            "num_spk": 2,
+            "predict_noise": False,
+            "nonlinear": "relu",
+            "layer": 4,
+            "unit": 256,
+            "segment_size": 20,
+            "dropout": 0.2,
+            "mem_type": "hc",
+            "seg_overlap": False,
+            "num_heads": 4,
+        },
+    },
+    "skim-attention-2spk-v2b": {
+        "path": project_root
+        / "checkpoints"
+        / "2speaker"
+        / "skim-attention-v2b"
+        / "best_model.pth",
+        "num_spk": 2,
+        "separator_class": SkiMAttentionSeparator,
+        "config": {
+            "input_dim": 256,
+            "causal": False,
+            "num_spk": 2,
+            "predict_noise": False,
+            "nonlinear": "relu",
+            "layer": 4,
+            "unit": 256,
+            "segment_size": 20,
+            "dropout": 0.2,
+            "mem_type": "hc",
+            "seg_overlap": False,
+            "num_heads": 4,
+        },
+    },
+    "skim-attention-2spk-v3": {
+        "path": project_root
+        / "checkpoints"
+        / "2speaker"
+        / "skim-attention-v3"
+        / "best_model.pth",
+        "num_spk": 2,
+        "separator_class": SkiMAttentionSeparator,
+        "config": {
+            "input_dim": 256,
+            "causal": False,
+            "num_spk": 2,
+            "predict_noise": False,
+            "nonlinear": "relu",
+            "layer": 4,
+            "unit": 256,
+            "segment_size": 20,
+            "dropout": 0.2,
+            "mem_type": "hc",
+            "seg_overlap": False,
+            "num_heads": 4,
+        },
+    },
 }
 
 MODEL_DISPLAY_NAMES = {
     "skim-2spk": "SkiM 2-Spk",
     "skim-attention-2spk": "SkiM Attention 2-Spk",
+    "skim-attention-2spk-v2a": "SkiM Attention 2-Spk (v2a)",
+    "skim-attention-2spk-v2b": "SkiM Attention 2-Spk (v2b)",
+    "skim-attention-2spk-v3": "SkiM Attention 2-Spk (v3)",
     "skim-3spk": "SkiM 3-Spk",
     "skim-attention-3spk": "SkiM Attention 3-Spk",
     "skim-3spk-transfer": "SkiM 3-Spk (Transfer)",
