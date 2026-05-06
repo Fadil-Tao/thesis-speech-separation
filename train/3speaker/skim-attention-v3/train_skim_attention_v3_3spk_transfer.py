@@ -313,12 +313,9 @@ def train_epoch(model, train_loader, optimizer, scaler, device, epoch):
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(
+        torch.nn.utils.clip_grad_norm_(
             model.parameters(), TRAIN_CONFIG["gradient_clip"]
         )
-
-        if grad_norm > 10.0:
-            print(f"\n⚠️ Warning: Large gradient norm ({grad_norm:.2f}), clipping applied")
 
         scaler.step(optimizer)
         scaler.update()
@@ -376,7 +373,18 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main(resume_from=None, num_epochs=None):
+def reset_layerscale_gates(model):
+    """Zero all LayerScale gates so attention starts as identity on the new task."""
+    zeroed = 0
+    for name, param in model.named_parameters():
+        if "gamma_attn" in name or "gamma_ffn" in name:
+            param.data.zero_()
+            zeroed += 1
+    print(f"  ✓ Reset {zeroed} LayerScale gates to 0.0 (fresh start for 3-speaker)")
+    return model
+
+
+def main(resume_from=None, num_epochs=None, reset_gates=False):
     """Main training function."""
     random.seed(TRAIN_CONFIG["seed"])
     np.random.seed(TRAIN_CONFIG["seed"])
@@ -458,13 +466,21 @@ def main(resume_from=None, num_epochs=None):
 
     model = build_model(device, use_transfer=True)
 
+    # Gate params get 10x lower LR — they're scalars with large gradients that
+    # overshoot when trained at the same rate as LSTM/attention weights.
+    gate_params  = [p for n, p in model.named_parameters() if "gamma_attn" in n or "gamma_ffn" in n]
+    other_params = [p for n, p in model.named_parameters() if "gamma_attn" not in n and "gamma_ffn" not in n]
     optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=TRAIN_CONFIG["learning_rate"],
+        [
+            {"params": other_params, "lr": TRAIN_CONFIG["learning_rate"]},
+            {"params": gate_params,  "lr": TRAIN_CONFIG["learning_rate"] * 0.1},
+        ],
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=TRAIN_CONFIG["weight_decay"],
     )
+    print(f"✓ Optimizer: LR={TRAIN_CONFIG['learning_rate']} (main), "
+          f"{TRAIN_CONFIG['learning_rate'] * 0.1} (gates)")
 
     scaler = torch.amp.GradScaler("cuda")
 
@@ -481,13 +497,25 @@ def main(resume_from=None, num_epochs=None):
     start_epoch = 1
     target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
 
+    if reset_gates and resume_from is None:
+        # No resume: gates came from 2spk pretrained load — zero them for the new task
+        print("\n🔄 Resetting LayerScale gates (--reset-gates):")
+        model = reset_layerscale_gates(model)
+
     if resume_from is not None:
         resume_path = project_root / resume_from
         print(f"\nLoading checkpoint: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
+        # --reset-gates after resume: zero gates even if checkpoint had non-zero values
+        if reset_gates:
+            print("\n🔄 Resetting LayerScale gates after resume (--reset-gates):")
+            model = reset_layerscale_gates(model)
         if "optimizer_state_dict" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except ValueError:
+                print("  ⚠️ Optimizer state incompatible (param group count changed), using fresh optimizer")
         if "scheduler_state_dict" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         if "scaler_state_dict" in ckpt:
@@ -571,6 +599,24 @@ def main(resume_from=None, num_epochs=None):
 
     except KeyboardInterrupt:
         print("\n⚠️ Training interrupted by user")
+        if train_losses:
+            interrupted_path = CHECKPOINT_DIR / "checkpoint_interrupted.pth"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
+                    "train_loss": train_losses[-1],
+                    "val_loss": val_losses[-1] if val_losses else float("inf"),
+                    "best_val_loss": best_val_loss,
+                    "train_losses": train_losses,
+                    "val_losses": val_losses,
+                },
+                interrupted_path,
+            )
+            print(f"  ✓ Interrupted checkpoint saved: checkpoint_interrupted.pth (epoch {epoch})")
     finally:
         if train_losses:
             print("\n" + "=" * 60)
@@ -598,6 +644,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--num-epochs", type=int, default=None)
+    parser.add_argument("--reset-gates", action="store_true", default=False,
+                        help="Zero LayerScale gates after loading pretrained weights")
     args = parser.parse_args()
 
-    main(resume_from=args.resume_from, num_epochs=args.num_epochs)
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs, reset_gates=args.reset_gates)

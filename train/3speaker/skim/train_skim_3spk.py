@@ -328,12 +328,6 @@ def train_epoch(model, train_loader, optimizer, scaler, device, epoch):
             model.parameters(), TRAIN_CONFIG["gradient_clip"]
         )
 
-        # Check gradient norm
-        if grad_norm > 10.0:
-            print(
-                f"\n⚠️ Warning: Large gradient norm ({grad_norm:.2f}), clipping applied"
-            )
-
         scaler.step(optimizer)
         scaler.update()
 
@@ -609,6 +603,24 @@ def main(resume_from=None, num_epochs=None):
 
     except KeyboardInterrupt:
         print("\n⚠️ Training interrupted by user")
+        if train_losses:
+            interrupted_path = CHECKPOINT_DIR / "checkpoint_interrupted.pth"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
+                    "train_loss": train_losses[-1],
+                    "val_loss": val_losses[-1] if val_losses else float("inf"),
+                    "best_val_loss": best_val_loss,
+                    "train_losses": train_losses,
+                    "val_losses": val_losses,
+                },
+                interrupted_path,
+            )
+            print(f"  ✓ Interrupted checkpoint saved: checkpoint_interrupted.pth (epoch {epoch})")
     finally:
         if train_losses:
             print("\n" + "=" * 60)
