@@ -6,6 +6,7 @@ for speech separation training. Optimized for local machine execution.
 """
 
 import os
+import sys
 import random
 import numpy as np
 import soundfile as sf
@@ -17,6 +18,10 @@ from tqdm import tqdm
 import json
 import argparse
 from datetime import datetime
+
+# Make project root importable regardless of CWD
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from utils.paths import get_raw_dir, get_synthetic_dir
 
 
 class TITMLMixGenerator2Spk:
@@ -484,14 +489,17 @@ def main():
     parser.add_argument(
         '--titml-dir',
         type=str,
-        default='/home/dl-1/hadad/speech-separation/dataset/raw/TTML-IDN',
-        help='Path to TITML-IDN raw dataset directory'
+        default=None,
+        help='Path to TITML-IDN raw dataset directory. '
+             'Falls back to $TSS_RAW_DIR or <project_root>/dataset/raw/TTML-IDN.'
     )
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='/home/dl-1/hadad/speech-separation/dataset/synthetic/TITML-2spk',
-        help='Output directory for generated dataset'
+        default=None,
+        help='Output directory for generated dataset. '
+             'Falls back to $TSS_SYNTHETIC_DIR/TITML-2spk or '
+             '<project_root>/dataset/synthetic/TITML-2spk.'
     )
     parser.add_argument(
         '--target-duration',
@@ -542,6 +550,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Resolve paths via env-aware helper
+    args.titml_dir = str(get_raw_dir(args.titml_dir))
+    args.output_dir = str(get_synthetic_dir('TITML-2spk', args.output_dir))
 
     # Calculate number of mixtures needed
     total_mixtures = int((args.target_hours * 3600) / args.target_duration)

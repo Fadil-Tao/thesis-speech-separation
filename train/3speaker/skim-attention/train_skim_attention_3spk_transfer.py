@@ -39,6 +39,7 @@ sys.path.insert(0, str(project_root / "train"))
 from datasets_utils import (
     build_utterance_split, DynamicMixDataset, IndonesianMixDataset
 )
+from utils.paths import get_raw_dir, get_synthetic_dir, get_checkpoint_dir
 
 # ESPnet imports
 from espnet2.enh.encoder.conv_encoder import ConvEncoder
@@ -98,10 +99,11 @@ TRANSFER_CONFIG = {
     "description": "Transfer from SkiM Attention 2-speaker to 3-speaker",
 }
 
-# Paths
-DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-3spk-v2"
-RAW_DIR = project_root / "dataset" / "raw" / "TTML-IDN"
-CHECKPOINT_DIR = project_root / "checkpoints" / "3speaker" / "skim-attention-transfer"
+# Paths — env-aware. Override via $TSS_RAW_DIR / $TSS_SYNTHETIC_DIR /
+# $TSS_CHECKPOINT_DIR / $TSS_PROJECT_ROOT.
+DATASET_DIR = get_synthetic_dir("TITML-3spk-v2")
+RAW_DIR = get_raw_dir()
+CHECKPOINT_DIR = get_checkpoint_dir("3speaker", "skim-attention-transfer")
 
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -112,8 +114,17 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_pretrained_weights(model, pretrained_path, device):
-    """Load pretrained 2-speaker weights, skip layers with shape mismatch."""
-    pretrained_full_path = project_root / pretrained_path
+    """Load pretrained 2-speaker weights, skip layers with shape mismatch.
+
+    ``pretrained_path`` may be absolute, or relative to project root.
+    Override at runtime via $TSS_PRETRAINED_PATH.
+    """
+    env_override = os.environ.get("TSS_PRETRAINED_PATH")
+    if env_override:
+        pretrained_full_path = Path(env_override).expanduser().resolve()
+    else:
+        p = Path(pretrained_path).expanduser()
+        pretrained_full_path = p if p.is_absolute() else (project_root / p).resolve()
 
     if not pretrained_full_path.exists():
         print(f"\n⚠️  Warning: Pretrained model not found at {pretrained_full_path}")

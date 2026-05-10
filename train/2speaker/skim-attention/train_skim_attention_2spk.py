@@ -40,6 +40,7 @@ sys.path.insert(0, str(project_root / "train"))
 from datasets_utils import (
     build_utterance_split, DynamicMixDataset, IndonesianMixDataset
 )
+from utils.paths import get_raw_dir, get_synthetic_dir, get_checkpoint_dir
 
 # ESPnet imports
 from espnet2.enh.encoder.conv_encoder import ConvEncoder
@@ -97,13 +98,11 @@ TRAIN_CONFIG = {
     "seed": 42,
 }
 
-# Paths
-DATASET_DIR = project_root / "dataset" / "synthetic" / "TITML-2spk-v2"
-RAW_DIR = project_root / "dataset" / "raw" / "TTML-IDN"
-CHECKPOINT_DIR = project_root / "checkpoints" / "2speaker" / "skim-attention"
-
-# Create checkpoint directory
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+# Paths — resolved with this priority: CLI flag > env var > project-root default.
+# Env vars: TSS_RAW_DIR, TSS_SYNTHETIC_DIR, TSS_CHECKPOINT_DIR, TSS_PROJECT_ROOT.
+DATASET_DIR = get_synthetic_dir("TITML-2spk-v2")
+RAW_DIR = get_raw_dir()
+CHECKPOINT_DIR = get_checkpoint_dir("2speaker", "skim-attention")
 
 
 # =============================================================================
@@ -353,8 +352,22 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main(resume_from=None, num_epochs=None):
+def main(resume_from=None, num_epochs=None,
+         dataset_dir=None, raw_dir=None, checkpoint_dir=None):
     """Main training function."""
+    # Apply path overrides (CLI > env > default)
+    global DATASET_DIR, RAW_DIR, CHECKPOINT_DIR
+    if dataset_dir:
+        DATASET_DIR = Path(dataset_dir).expanduser().resolve()
+    if raw_dir:
+        RAW_DIR = Path(raw_dir).expanduser().resolve()
+    if checkpoint_dir:
+        CHECKPOINT_DIR = Path(checkpoint_dir).expanduser().resolve()
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"DATASET_DIR    = {DATASET_DIR}")
+    print(f"RAW_DIR        = {RAW_DIR}")
+    print(f"CHECKPOINT_DIR = {CHECKPOINT_DIR}")
+
     # Set random seeds
     random.seed(TRAIN_CONFIG["seed"])
     np.random.seed(TRAIN_CONFIG["seed"])
@@ -582,5 +595,13 @@ if __name__ == "__main__":
                         help="Checkpoint filename to resume from (e.g. checkpoint_epoch_30.pth)")
     parser.add_argument("--num-epochs", type=int, default=None,
                         help="Total number of epochs to train (overrides config)")
+    parser.add_argument("--dataset-dir", type=str, default=None,
+                        help="Override synthetic dataset dir (else $TSS_SYNTHETIC_DIR or project default)")
+    parser.add_argument("--raw-dir", type=str, default=None,
+                        help="Override raw TITML-IDN dir (else $TSS_RAW_DIR or project default)")
+    parser.add_argument("--checkpoint-dir", type=str, default=None,
+                        help="Override checkpoint output dir (else $TSS_CHECKPOINT_DIR or project default)")
     args = parser.parse_args()
-    main(resume_from=args.resume_from, num_epochs=args.num_epochs)
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs,
+         dataset_dir=args.dataset_dir, raw_dir=args.raw_dir,
+         checkpoint_dir=args.checkpoint_dir)
