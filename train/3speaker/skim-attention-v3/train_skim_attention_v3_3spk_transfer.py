@@ -384,7 +384,43 @@ def reset_layerscale_gates(model):
     return model
 
 
-def main(resume_from=None, num_epochs=None, reset_gates=False):
+def freeze_attn_gates(model):
+    """Freeze γ_attn params to preserve the 2spk-trained denoising filter."""
+    for name, param in model.named_parameters():
+        if "gamma_attn" in name:
+            param.requires_grad = False
+    return model
+
+
+def is_stage1_param(name):
+    """Stage-1 trainable: LayerScale gates + reinitialized 3spk output head."""
+    return (
+        "gamma_attn" in name
+        or "gamma_ffn" in name
+        or "output_fc.1" in name
+    )
+
+
+def freeze_for_stage1(model):
+    """Freeze the backbone; leave only γ gates + output_fc.1 trainable."""
+    n_train = 0
+    for name, param in model.named_parameters():
+        if is_stage1_param(name):
+            param.requires_grad = True
+            n_train += param.numel()
+        else:
+            param.requires_grad = False
+    return model, n_train
+
+
+def unfreeze_all(model):
+    for param in model.parameters():
+        param.requires_grad = True
+    return model
+
+
+def main(resume_from=None, num_epochs=None, reset_gates=False, freeze_gates=False,
+         two_stage=False, stage1_epochs=5, stage1_lr=1e-3):
     """Main training function."""
     random.seed(TRAIN_CONFIG["seed"])
     np.random.seed(TRAIN_CONFIG["seed"])
@@ -466,21 +502,46 @@ def main(resume_from=None, num_epochs=None, reset_gates=False):
 
     model = build_model(device, use_transfer=True)
 
-    # Gate params get 10x lower LR — they're scalars with large gradients that
-    # overshoot when trained at the same rate as LSTM/attention weights.
-    gate_params  = [p for n, p in model.named_parameters() if "gamma_attn" in n or "gamma_ffn" in n]
-    other_params = [p for n, p in model.named_parameters() if "gamma_attn" not in n and "gamma_ffn" not in n]
+    best_val_loss = float("inf")
+    start_epoch = 1
+    target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
+    ckpt = None
+
+    if resume_from is not None:
+        resume_path = project_root / resume_from
+        print(f"\nLoading checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        best_val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss", best_val_loss))
+        start_epoch = ckpt.get("epoch", 0) + 1
+        print(f"✓ Resumed from epoch {start_epoch - 1}.")
+
+    if reset_gates:
+        print("\n🔄 Resetting LayerScale gates (--reset-gates):")
+        model = reset_layerscale_gates(model)
+
+    if freeze_gates:
+        model = freeze_attn_gates(model)
+
+    # Two-stage TL: stage 1 trains only γ gates + 3spk output head while the
+    # backbone is frozen. After `stage1_epochs` epochs we unfreeze everything
+    # and switch to the regular fine-tune LR (stage 2).
+    in_stage1 = two_stage and start_epoch <= stage1_epochs
+    if in_stage1:
+        model, n_stage1 = freeze_for_stage1(model)
+        print(f"\n🔒 Stage 1: backbone frozen, training {n_stage1} params (γ gates + output_fc.1) for {stage1_epochs} epochs at LR={stage1_lr}")
+
+    # Optimizer must be created AFTER freezing, so frozen params are excluded.
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    current_lr = stage1_lr if in_stage1 else TRAIN_CONFIG["learning_rate"]
     optimizer = torch.optim.Adam(
-        [
-            {"params": other_params, "lr": TRAIN_CONFIG["learning_rate"]},
-            {"params": gate_params,  "lr": TRAIN_CONFIG["learning_rate"] * 0.1},
-        ],
+        trainable_params,
+        lr=current_lr,
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=TRAIN_CONFIG["weight_decay"],
     )
-    print(f"✓ Optimizer: LR={TRAIN_CONFIG['learning_rate']} (main), "
-          f"{TRAIN_CONFIG['learning_rate'] * 0.1} (gates)")
+    print(f"✓ Optimizer: LR={current_lr}")
 
     scaler = torch.amp.GradScaler("cuda")
 
@@ -493,36 +554,16 @@ def main(resume_from=None, num_epochs=None, reset_gates=False):
         verbose=True,
     )
 
-    best_val_loss = float("inf")
-    start_epoch = 1
-    target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
-
-    if reset_gates and resume_from is None:
-        # No resume: gates came from 2spk pretrained load — zero them for the new task
-        print("\n🔄 Resetting LayerScale gates (--reset-gates):")
-        model = reset_layerscale_gates(model)
-
-    if resume_from is not None:
-        resume_path = project_root / resume_from
-        print(f"\nLoading checkpoint: {resume_path}")
-        ckpt = torch.load(resume_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        # --reset-gates after resume: zero gates even if checkpoint had non-zero values
-        if reset_gates:
-            print("\n🔄 Resetting LayerScale gates after resume (--reset-gates):")
-            model = reset_layerscale_gates(model)
+    if ckpt is not None:
         if "optimizer_state_dict" in ckpt:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            except ValueError:
-                print("  ⚠️ Optimizer state incompatible (param group count changed), using fresh optimizer")
+            except (ValueError, KeyError):
+                print("  ⚠️ Optimizer state incompatible (param count/group changed), using fresh optimizer")
         if "scheduler_state_dict" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         if "scaler_state_dict" in ckpt:
             scaler.load_state_dict(ckpt["scaler_state_dict"])
-        best_val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss", best_val_loss))
-        start_epoch = ckpt.get("epoch", 0) + 1
-        print(f"✓ Resumed from epoch {start_epoch - 1}.")
 
     # Load full per-epoch history from JSON (preferred over checkpoint lists)
     train_losses, val_losses = load_training_history(CHECKPOINT_DIR)
@@ -540,6 +581,22 @@ def main(resume_from=None, num_epochs=None, reset_gates=False):
 
     try:
         for epoch in range(start_epoch, target_num_epochs + 1):
+            # Stage transition: unfreeze backbone + rebuild optimizer/scheduler at fine-tune LR
+            if two_stage and in_stage1 and epoch > stage1_epochs:
+                print(f"\n🔓 Stage 2: unfreezing backbone, switching to LR={TRAIN_CONFIG['learning_rate']}")
+                model = unfreeze_all(model)
+                optimizer = torch.optim.Adam(
+                    model.parameters(),
+                    lr=TRAIN_CONFIG["learning_rate"],
+                    betas=(0.9, 0.999),
+                    eps=1e-8,
+                    weight_decay=TRAIN_CONFIG["weight_decay"],
+                )
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6, verbose=True,
+                )
+                in_stage1 = False
+
             train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
             train_losses.append(train_loss)
 
@@ -646,6 +703,18 @@ if __name__ == "__main__":
     parser.add_argument("--num-epochs", type=int, default=None)
     parser.add_argument("--reset-gates", action="store_true", default=False,
                         help="Zero LayerScale gates after loading pretrained weights")
+    parser.add_argument("--freeze-gates", action="store_true", default=False,
+                        help="Freeze γ_attn gates to preserve the 2spk denoising filter")
+    parser.add_argument("--two-stage", action="store_true", default=False,
+                        help="Adapter-style TL: stage 1 trains only γ gates + 3spk output head with backbone frozen, "
+                             "then stage 2 unfreezes everything")
+    parser.add_argument("--stage1-epochs", type=int, default=5,
+                        help="Number of epochs for stage 1 (only with --two-stage)")
+    parser.add_argument("--stage1-lr", type=float, default=1e-3,
+                        help="Learning rate for stage 1 (gates + output head learn fast)")
     args = parser.parse_args()
 
-    main(resume_from=args.resume_from, num_epochs=args.num_epochs, reset_gates=args.reset_gates)
+    main(resume_from=args.resume_from, num_epochs=args.num_epochs,
+         reset_gates=args.reset_gates, freeze_gates=args.freeze_gates,
+         two_stage=args.two_stage, stage1_epochs=args.stage1_epochs,
+         stage1_lr=args.stage1_lr)
