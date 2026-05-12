@@ -45,7 +45,7 @@ pass "R2 round-trip OK"
 echo "[3/3] gdown can reach ckpt file IDs"
 command -v gdown >/dev/null || fail "gdown not installed. pip install gdown"
 for fid in "$REG_CKPT_FILE_ID" "$VANILLA_CKPT_FILE_ID" "$RAW_FILE_ID"; do
-    if gdown --id "$fid" -O /dev/null --no-cookies 2>&1 | head -n 5 | grep -qi "permission\|cannot retrieve\|not found"; then
+    if gdown "https://drive.google.com/uc?id=$fid" -O /dev/null --no-cookies 2>&1 | head -n 5 | grep -qi "permission\|cannot retrieve\|not found"; then
         fail "Drive file $fid not accessible"
     fi
     pass "Drive file $fid reachable"
@@ -54,8 +54,8 @@ done
 if [ "${DOWNLOAD_CKPTS:-0}" = "1" ]; then
     echo "[extra] full ckpt download (DOWNLOAD_CKPTS=1)"
     mkdir -p /tmp/vast_run_probe
-    gdown --id "$REG_CKPT_FILE_ID"     -O /tmp/vast_run_probe/reg.tar.gz
-    gdown --id "$VANILLA_CKPT_FILE_ID" -O /tmp/vast_run_probe/vanilla.zip
+    gdown "https://drive.google.com/uc?id=$REG_CKPT_FILE_ID"     -O /tmp/vast_run_probe/reg.tar.gz
+    gdown "https://drive.google.com/uc?id=$VANILLA_CKPT_FILE_ID" -O /tmp/vast_run_probe/vanilla.zip
     ls -lh /tmp/vast_run_probe/
     pass "both ckpt archives downloaded into /tmp/vast_run_probe/"
 fi

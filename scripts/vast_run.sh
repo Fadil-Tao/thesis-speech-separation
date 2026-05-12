@@ -88,7 +88,7 @@ python "$SCRIPT_DIR/r2_util.py" probe >/dev/null \
 mkdir -p "$ZIPS_DIR" "$RAW_DIR"
 if [ ! -d "$RAW_DIR/Speech" ]; then
     log "Downloading TITML-IDN raw zip"
-    gdown --id "$RAW_FILE_ID" -O "$ZIPS_DIR/TITML-IDN.zip" || fail "Raw dataset download failed."
+    gdown "https://drive.google.com/uc?id=$RAW_FILE_ID" -O "$ZIPS_DIR/TITML-IDN.zip" || fail "Raw dataset download failed."
     log "Extracting raw zip (AES)"
     python - <<PYEOF
 import pyzipper, os
@@ -139,7 +139,7 @@ download_and_extract() {
     fi
 
     log "Downloading ckpt → $archive_path"
-    gdown --id "$file_id" -O "$archive_path" || fail "ckpt download failed for $file_id."
+    gdown "https://drive.google.com/uc?id=$file_id" -O "$archive_path" || fail "ckpt download failed for $file_id."
 
     log "Extracting $archive_path → $dest_dir"
     case "$archive_type" in
