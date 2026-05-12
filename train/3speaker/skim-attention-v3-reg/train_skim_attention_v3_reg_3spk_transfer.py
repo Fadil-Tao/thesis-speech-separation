@@ -384,7 +384,7 @@ def main(resume_from=None, num_epochs=None, reset_gates=False,
     print(f"✓ Dev batches: {len(dev_loader)}")
     print(f"✓ Test batches: {len(test_loader)}")
 
-    model = build_model(device, use_transfer=True)
+    model = build_model(device, use_transfer=(resume_from is None))
 
     best_val_loss = float("inf")
     start_epoch = 1
