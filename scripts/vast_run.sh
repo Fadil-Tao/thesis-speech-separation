@@ -44,7 +44,7 @@ ZIPS_DIR="dataset/zips"
 
 RAW_FILE_ID="1ETEzZhm5s5XAp1tKUtSj9zq4Ic-7tben"
 RAW_PASSWORD="Hwd9m2x_d3ig"
-REG_CKPT_FILE_ID="1KEEY8q8ZPtGVeVUdmJl-aGtNXtUHy28"
+REG_CKPT_FILE_ID="1KEEY8q8ZPtGVeVUdmJl-aGtNXtUHy28T"
 VANILLA_CKPT_FILE_ID="1JaR9IOuHnlgDcofajzNT_Q62CLbva1wy"
 
 log()  { printf '\n\033[1;36m[vast_run]\033[0m %s\n' "$*"; }
