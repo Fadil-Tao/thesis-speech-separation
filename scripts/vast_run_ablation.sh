@@ -159,45 +159,16 @@ upload_results() {
 
 log "Starting K-size ablation: K=[${K_VALUES}], epochs=${EPOCHS}, overlap=${OVERLAP}"
 
-# Periodic uploader — keeps R2 in sync with in-progress local checkpoints.
-# Runs in background during each K training. Killed when K finishes.
-# Interval (seconds) configurable via UPLOAD_INTERVAL (default 600 = 10 min).
-UPLOAD_INTERVAL="${UPLOAD_INTERVAL:-600}"
-
-start_periodic_uploader() {
-    local src_dir="$1"
-    local run_name="$2"
-    (
-        while true; do
-            sleep "$UPLOAD_INTERVAL"
-            if [ -f "$src_dir/best_model.pth" ] || ls "$src_dir"/checkpoint_epoch_*.pth >/dev/null 2>&1; then
-                printf '\n\033[1;33m[periodic-upload]\033[0m %s → s3://%s/%s/ablations/%s/\n' \
-                    "$(date +%H:%M:%S)" "$R2_BUCKET" "$R2_PREFIX" "$run_name"
-                python "$SCRIPT_DIR/r2_util.py" upload "$src_dir" "${R2_PREFIX}/ablations/${run_name}" \
-                    --include "best_model.pth" \
-                    --include "training_history.json" \
-                    --include "training_curves.png" \
-                    --include "checkpoint_epoch_*.pth" \
-                    --include "checkpoint_interrupted.pth" \
-                    --include "run.log" \
-                    2>&1 | tail -n 3 || true
-            fi
-        done
-    ) &
-    echo $!
-}
+export PYTHONUNBUFFERED=1   # ensure training prints/tqdm stream live through `tee`
 
 for K in ${K_VALUES}; do
     TAG="k${K}_overlap${OVERLAP_TAG}"
     CKPT_DIR="checkpoints/ablations/k-size/${TAG}"
     mkdir -p "$CKPT_DIR"
 
-    log "Run K=${K} ${OVERLAP_FLAG} → ${CKPT_DIR}  (periodic upload every ${UPLOAD_INTERVAL}s)"
+    log "Run K=${K} ${OVERLAP_FLAG} → ${CKPT_DIR}"
 
-    UPLOADER_PID=$(start_periodic_uploader "$CKPT_DIR" "k-size/${TAG}")
-    trap "kill $UPLOADER_PID 2>/dev/null || true" EXIT
-
-    python train/ablations/k-size/train_k_ablation.py \
+    python -u train/ablations/k-size/train_k_ablation.py \
         --k "${K}" \
         --num-epochs "${EPOCHS}" \
         --dataset-dir "$PROJECT_ROOT/$SYNTH_DIR" \
@@ -205,12 +176,9 @@ for K in ${K_VALUES}; do
         --checkpoint-dir "$PROJECT_ROOT/$CKPT_DIR" \
         ${OVERLAP_FLAG} \
         2>&1 | tee "$CKPT_DIR/run.log" \
-        || { kill "$UPLOADER_PID" 2>/dev/null || true; fail "Ablation run failed at K=${K}."; }
+        || fail "Ablation run failed at K=${K}."
 
-    kill "$UPLOADER_PID" 2>/dev/null || true
-    trap - EXIT
-
-    log "K=${K} done → final upload"
+    log "K=${K} done → upload to R2"
     upload_results "$CKPT_DIR" "k-size/${TAG}"
 done
 
