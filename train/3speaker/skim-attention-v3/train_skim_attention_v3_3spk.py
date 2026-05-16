@@ -6,14 +6,12 @@ v3 keeps MemLSTM intact and inserts a Multi-Head Self-Attention block
 
 Usage:
     python train_skim_attention_v3_3spk.py
-    python train_skim_attention_v3_3spk.py --resume-from checkpoints/3speaker/skim-attention-v3/best_model.pth
 """
 
 import os
 import sys
 import json
 import random
-import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -320,7 +318,7 @@ def validate(model, val_loader, device, epoch):
 # =============================================================================
 
 
-def main(resume_from=None, num_epochs=None):
+def main():
     random.seed(TRAIN_CONFIG["seed"])
     np.random.seed(TRAIN_CONFIG["seed"])
     torch.manual_seed(TRAIN_CONFIG["seed"])
@@ -404,44 +402,15 @@ def main(resume_from=None, num_epochs=None):
     )
 
     best_val_loss = float("inf")
-    start_epoch = 1
-    target_num_epochs = num_epochs if num_epochs is not None else TRAIN_CONFIG["num_epochs"]
-    ckpt = None
-
-    if resume_from is not None:
-        resume_path = Path(resume_from)
-        if not resume_path.is_absolute():
-            resume_path = project_root / resume_path
-        print(f"\nLoading checkpoint: {resume_path}")
-        ckpt = torch.load(resume_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        if "optimizer_state_dict" in ckpt:
-            try:
-                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            except ValueError:
-                print("  ⚠️ Optimizer state incompatible, using fresh optimizer")
-        if "scheduler_state_dict" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        if "scaler_state_dict" in ckpt:
-            scaler.load_state_dict(ckpt["scaler_state_dict"])
-        best_val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss", best_val_loss))
-        start_epoch = ckpt.get("epoch", 0) + 1
-        print(f"✓ Resumed from epoch {start_epoch - 1} (best SI-SNR so far: {-best_val_loss:.2f} dB)")
 
     train_losses, val_losses = load_training_history(CHECKPOINT_DIR)
-    if not train_losses and ckpt is not None and "train_losses" in ckpt:
-        train_losses = ckpt["train_losses"]
-        val_losses = ckpt["val_losses"]
-    if start_epoch > 1 and len(train_losses) >= start_epoch - 1:
-        train_losses = train_losses[: start_epoch - 1]
-        val_losses = val_losses[: start_epoch - 1]
 
     print("\n" + "=" * 60)
     print("Starting Training")
     print("=" * 60)
 
     try:
-        for epoch in range(start_epoch, target_num_epochs + 1):
+        for epoch in range(1, TRAIN_CONFIG["num_epochs"] + 1):
             train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
             train_losses.append(train_loss)
 
@@ -537,12 +506,4 @@ def main(resume_from=None, num_epochs=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="SkiM Attention v3 3-Speaker Training"
-    )
-    parser.add_argument("--resume-from", type=str, default=None,
-                        help="Path to checkpoint to resume from (absolute or relative to project root).")
-    parser.add_argument("--num-epochs", type=int, default=None,
-                        help="Override TRAIN_CONFIG num_epochs (e.g. extend a finished run).")
-    args = parser.parse_args()
-    main(resume_from=args.resume_from, num_epochs=args.num_epochs)
+    main()

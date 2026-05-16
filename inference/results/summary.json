@@ -1,0 +1,34 @@
+{
+  "skim": {
+    "mean_sisnr": 14.123434066772461,
+    "std_sisnr": 1.9947593212127686,
+    "mean_sisnri": 17.50351333618164,
+    "std_sisnri": 1.9767736196517944,
+    "median_sisnr": 13.775655746459961,
+    "n": 20
+  },
+  "skim-transfer": {
+    "mean_sisnr": 15.200390815734863,
+    "std_sisnr": 1.9470419883728027,
+    "mean_sisnri": 18.580469131469727,
+    "std_sisnri": 1.9164024591445923,
+    "median_sisnr": 15.037513732910156,
+    "n": 20
+  },
+  "skim-attention-v3": {
+    "mean_sisnr": 14.298945426940918,
+    "std_sisnr": 1.8015385866165161,
+    "mean_sisnri": 17.67902374267578,
+    "std_sisnri": 1.7793986797332764,
+    "median_sisnr": 13.987405776977539,
+    "n": 20
+  },
+  "skim-attention-v3-reg-transfer": {
+    "mean_sisnr": 15.088671684265137,
+    "std_sisnr": 1.9935433864593506,
+    "mean_sisnri": 18.468753814697266,
+    "std_sisnri": 1.9721025228500366,
+    "median_sisnr": 14.893108367919922,
+    "n": 20
+  }
+}
