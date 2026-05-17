@@ -49,7 +49,8 @@ pip install \
     espnet==202304 espnet_model_zoo \
     soundfile librosa==0.9.2 \
     mir_eval pesq pystoi \
-    matplotlib tqdm gdown pyzipper
+    matplotlib tqdm gdown pyzipper \
+    boto3
 
 # -----------------------------------------------------------------------------
 # 2. Raw TITML-IDN

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Cloudflare R2 helper — probe and upload.
+"""Cloudflare R2 helper — probe, upload, download, list.
 
 Subcommands:
-    probe                        list bucket + put/get/delete a tiny object
-    upload SRC DEST [--include PATTERN ...]   upload matching files in SRC to DEST prefix
+    probe                                     list bucket + put/get/delete a tiny object
+    upload   SRC DEST [--include PATTERN ...] upload matching files in SRC to DEST prefix
+    download SRC_PREFIX DEST_DIR [--include PATTERN ...] download objects under SRC_PREFIX to DEST_DIR
+    list     PREFIX                           list keys under PREFIX
 
 Env vars required:
     AWS_ACCESS_KEY_ID
@@ -101,6 +103,63 @@ def cmd_upload(args):
         sys.exit("no files matched include patterns")
 
 
+def cmd_download(args):
+    bucket = os.environ["R2_BUCKET"]
+    src_prefix = args.src.rstrip("/") + "/"
+    dest = Path(args.dest).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    patterns = args.include or ["*"]
+    flat = args.flat
+
+    s3 = _client()
+    paginator = s3.get_paginator("list_objects_v2")
+
+    downloaded = 0
+    skipped = 0
+    for page in paginator.paginate(Bucket=bucket, Prefix=src_prefix):
+        for obj in page.get("Contents", []) or []:
+            key = obj["Key"]
+            base = os.path.basename(key)
+            if not base:
+                continue
+            if not any(fnmatch.fnmatch(base, pat) for pat in patterns):
+                skipped += 1
+                continue
+            if flat:
+                local = dest / base
+            else:
+                rel = key[len(src_prefix):]
+                local = dest / rel
+            local.parent.mkdir(parents=True, exist_ok=True)
+            size_mb = obj.get("Size", 0) / 1e6
+            print(f"  ← s3://{bucket}/{key}  ({size_mb:.1f} MB) → {local}")
+            try:
+                s3.download_file(bucket, key, str(local))
+            except ClientError as e:
+                sys.exit(f"download failed for {key}: {e}")
+            downloaded += 1
+
+    print(f"downloaded {downloaded} file(s), skipped {skipped} non-matching")
+    if downloaded == 0:
+        sys.exit(f"no files matched under s3://{bucket}/{src_prefix}")
+
+
+def cmd_list(args):
+    bucket = os.environ["R2_BUCKET"]
+    prefix = args.prefix.rstrip("/") + "/"
+    s3 = _client()
+    paginator = s3.get_paginator("list_objects_v2")
+    n = 0
+    total_mb = 0.0
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []) or []:
+            size_mb = obj.get("Size", 0) / 1e6
+            total_mb += size_mb
+            print(f"  {obj['Key']}  ({size_mb:.1f} MB)")
+            n += 1
+    print(f"total: {n} object(s), {total_mb:.1f} MB")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cloudflare R2 helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -112,11 +171,26 @@ def main():
     up.add_argument("dest", help="dest prefix (no leading slash, no s3:// prefix)")
     up.add_argument("--include", action="append", default=[], help="glob pattern on basename, repeatable")
 
+    dn = sub.add_parser("download", help="download objects under a prefix from R2")
+    dn.add_argument("src", help="source prefix in R2 (no leading slash, no s3:// prefix)")
+    dn.add_argument("dest", help="local destination directory")
+    dn.add_argument("--include", action="append", default=[],
+                    help="glob pattern on basename, repeatable (default: *)")
+    dn.add_argument("--flat", action="store_true",
+                    help="flatten nested keys into dest dir (drop subdirs)")
+
+    ls = sub.add_parser("list", help="list keys under a prefix")
+    ls.add_argument("prefix", help="prefix to list (no leading slash, no s3:// prefix)")
+
     args = parser.parse_args()
     if args.cmd == "probe":
         cmd_probe(args)
     elif args.cmd == "upload":
         cmd_upload(args)
+    elif args.cmd == "download":
+        cmd_download(args)
+    elif args.cmd == "list":
+        cmd_list(args)
 
 
 if __name__ == "__main__":
