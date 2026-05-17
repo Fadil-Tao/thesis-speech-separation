@@ -1,0 +1,6 @@
+2speaker-skim=10JL7zc5M53QfJe1T-4dVSGObIgstPFb4
+2speaker-skim-attention=1CrXsTs4aWF-qCcy6rO9b4B_HOJoDqy6T
+3speaker-skim=1bpCCa5JL-pzvKFg0dlKgfkdzeyOpdffe
+3speaker-skim-attention=1C-LtkySJCm-1Tv5dvhjmtapVhe45Hqv4
+3speaker-skim-transfer=1keqV5YJnbOYnscHPD9OM8qu0v48QWV5A
+3speaker-skim-attention-transfer=1nzieK7hUAFxYAbzAc9REhUIuWtbWhAou
