@@ -87,7 +87,7 @@ MODEL_CONFIG = {
 TRAIN_CONFIG = {
     "batch_size": 8,
     "num_epochs": 100,
-    "learning_rate": 1e-4,  # 10x smaller for transfer learning
+    "learning_rate": 1e-3,  # paper-faith Sec 3.3
     "weight_decay": 0.0,
     "gradient_clip": 5.0,
     "seed": 42,
@@ -405,7 +405,7 @@ def main(resume_from=None, num_epochs=None, reset_gates=False):
     print("=" * 60)
     print(f"Source: {TRANSFER_CONFIG['pretrained_path']}")
     print(f"Target: 3-speaker separation")
-    print(f"Learning Rate: {TRAIN_CONFIG['learning_rate']} (10x smaller)")
+    print(f"Learning Rate: {TRAIN_CONFIG['learning_rate']}")
     print("=" * 60)
 
     # Build utterance-level split from raw dataset

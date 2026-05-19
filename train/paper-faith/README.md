@@ -25,6 +25,7 @@ Everything else (encoder, optimizer, loss, dataset split, transfer logic,
 | `3speaker/train_skim_paperfaith.py` | `train/3speaker/skim/` | `checkpoints/paper-faith/3speaker-skim/` |
 | `3speaker/train_skim_attention_v3_paperfaith.py` | `train/3speaker/skim-attention-v3/` | `checkpoints/paper-faith/3speaker-skim-attention-v3/` |
 | `3speaker/train_skim_transfer_paperfaith.py` | `train/3speaker/skim/train_skim_3spk_transfer.py` | `checkpoints/paper-faith/3speaker-skim-transfer/` |
+| `3speaker/train_skim_attention_v3_transfer_paperfaith.py` | `train/3speaker/skim-attention-v3/train_skim_attention_v3_3spk_transfer.py` | `checkpoints/paper-faith/3speaker-skim-attention-v3-transfer/` |
 | `3speaker/train_skim_attention_v3_reg_transfer_paperfaith.py` | `train/3speaker/skim-attention-v3-reg/` | `checkpoints/paper-faith/3speaker-skim-attention-v3-reg-transfer/` |
 
 ### Why 7 not 6
