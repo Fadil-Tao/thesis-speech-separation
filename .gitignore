@@ -24,3 +24,7 @@ dataset/generator/notebooks-py/
 scripts/rclone.conf
 scripts/r2.env
 papers
+
+**/**.pth
+*.pth
+checkpoints*/
