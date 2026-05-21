@@ -59,13 +59,13 @@ from implementation.skim.skim_separator import SkiMSeparator
 MODEL_CONFIG = {
     "encoder": {
         "channel": 256,
-        "kernel_size": 40,
-        "stride": 20,
+        "kernel_size": 16,
+        "stride": 8,
     },
     "decoder": {
         "channel": 256,
-        "kernel_size": 40,
-        "stride": 20,
+        "kernel_size": 16,
+        "stride": 8,
     },
     "separator": {
         "input_dim": 256,

@@ -62,13 +62,13 @@ from implementation.skim.skim_separator import SkiMSeparator
 MODEL_CONFIG = {
     "encoder": {
         "channel": 256,
-        "kernel_size": 40,
-        "stride": 20,
+        "kernel_size": 16,
+        "stride": 8,
     },
     "decoder": {
         "channel": 256,
-        "kernel_size": 40,
-        "stride": 20,
+        "kernel_size": 16,
+        "stride": 8,
     },
     "separator": {
         "input_dim": 256,
@@ -143,7 +143,7 @@ def resolve_resume_path(resume_from):
     raise FileNotFoundError(
         "Checkpoint not found. Searched these paths:\n"
         f"{searched}\n"
-        "Hint: use a path like checkpoints/3speaker/skim/checkpoint_epoch_30.pth"
+        "Hint: use a path like checkpoints/paper-faith-strict/3speaker-skim/checkpoint_epoch_30.pth"
     )
 
 

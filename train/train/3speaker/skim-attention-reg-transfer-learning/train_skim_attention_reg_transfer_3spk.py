@@ -6,12 +6,12 @@ the γ-regularized 2spk checkpoint (Option A from the SkiM Attention v3 transfer
 diagnostics: gates pulled toward 0 during pretraining → less 2spk-specific
 specialization → cleaner transfer).
 
-Pretrained source: checkpoints/2speaker/skim-attention-v3-reg/best_model.pth
-Output dir:        checkpoints/3speaker/skim-attention-v3-reg-transfer/
+Pretrained source: checkpoints/paper-faith-strict/2speaker-skim-attention-reg/best_model.pth
+Output dir:        checkpoints/paper-faith-strict/3speaker-skim-attention-reg-transfer/
 
 Usage:
-    uv run python train/3speaker/skim-attention-v3-reg/train_skim_attention_v3_reg_3spk_transfer.py
-    uv run python train/3speaker/skim-attention-v3-reg/train_skim_attention_v3_reg_3spk_transfer.py --two-stage
+    python train/train/3speaker/skim-attention-reg-transfer-learning/train_skim_attention_reg_transfer_3spk.py
+    python train/train/3speaker/skim-attention-reg-transfer-learning/train_skim_attention_reg_transfer_3spk.py --two-stage
 """
 
 import sys
@@ -50,8 +50,8 @@ from implementation.skim_attention_v3.skim_attention_v3_separator import (
 # =============================================================================
 
 MODEL_CONFIG = {
-    "encoder": {"channel": 256, "kernel_size": 40, "stride": 20},
-    "decoder": {"channel": 256, "kernel_size": 40, "stride": 20},
+    "encoder": {"channel": 256, "kernel_size": 16, "stride": 8},
+    "decoder": {"channel": 256, "kernel_size": 16, "stride": 8},
     "separator": {
         "input_dim": 256,
         "causal": False,
@@ -100,7 +100,7 @@ def load_pretrained_weights(model, pretrained_path, device):
     if not pretrained_full_path.exists():
         print(f"\n⚠️  Pretrained model not found at {pretrained_full_path}")
         print("Run the γ-regularized 2spk pretraining first:")
-        print("  uv run python train/2speaker/skim-attention-v3-reg/train_skim_attention_v3_reg_2spk.py")
+        print("  python train/train/2speaker/skim-attention-reg/train_skim_attention_reg_2spk.py")
         sys.exit(1)
 
     print(f"\n📥 Loading pretrained weights from: {pretrained_path}")
