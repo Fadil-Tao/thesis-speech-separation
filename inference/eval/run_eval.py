@@ -63,8 +63,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Paper-faith config (K=150, dropout=0.1, layer=4, unit=256)
 def build_config(num_spk: int, arch: str) -> dict:
     cfg = {
-        "encoder": {"channel": 256, "kernel_size": 32, "stride": 16},
-        "decoder": {"channel": 256, "kernel_size": 32, "stride": 16},
+        "encoder": {"channel": 256, "kernel_size": 16, "stride": 8},
+        "decoder": {"channel": 256, "kernel_size": 16, "stride": 8},
         "separator": {
             "input_dim": 256,
             "causal": False,
