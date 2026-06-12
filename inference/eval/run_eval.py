@@ -3,9 +3,17 @@
 For each model in best-model-list.txt:
   1. Download best_model.pth from Google Drive (if not present)
   2. Run on full test set (matching num_spk dataset)
-  3. Save per-file SI-SNR/SI-SNRi CSV (all 3600)
+  3. Save per-file SI-SNR/SI-SNRi/STOI/PESQ CSV (all 3600)
   4. Save mixture + estimated + ground-truth WAVs (first 450 only)
   5. Append model stats to summary.json
+
+Metrics:
+  SI-SNR  scale-invariant SDR (PIT-aligned best permutation)
+  SI-SNRi SI-SNR improvement over input mixture
+  STOI    short-time objective intelligibility (0..1, extended=False)
+  PESQ    perceptual quality, wideband mode 'wb' (needs 16 kHz)
+STOI/PESQ are NOT permutation-invariant -> computed on PIT-aligned estimates.
+Requires: pip install pystoi pesq
 
 Model name parsing:
   prefix "2speaker-" | "3speaker-"        → num_spk
@@ -31,6 +39,8 @@ import numpy as np
 import soundfile as sf
 import torch
 from tqdm import tqdm
+from pystoi import stoi as _stoi
+from pesq import pesq as _pesq
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -154,6 +164,22 @@ def best_pit(ests, refs) -> tuple[float, tuple[int, ...]]:
     return best_val, best_perm
 
 
+def stoi_score(ref: np.ndarray, est: np.ndarray) -> float:
+    """STOI (0..1). ref=bersih, est=hasil pisah yang sudah diselaraskan PIT."""
+    try:
+        return float(_stoi(ref, est, SAMPLE_RATE, extended=False))
+    except Exception:
+        return float("nan")
+
+
+def pesq_score(ref: np.ndarray, est: np.ndarray) -> float:
+    """PESQ wideband (mode 'wb', butuh 16 kHz). nan jika PESQ gagal (sinyal diam/degenerasi)."""
+    try:
+        return float(_pesq(SAMPLE_RATE, ref, est, "wb"))
+    except Exception:
+        return float("nan")
+
+
 def build_model(num_spk: int, arch: str, ckpt_path: Path):
     cfg = build_config(num_spk, arch)
     enc = ConvEncoder(**cfg["encoder"])
@@ -234,9 +260,9 @@ def eval_model(name: str, gdrive_id: str, audio_limit: int) -> dict:
 
     csv_path = out_dir / "per_file.csv"
     csv_f = csv_path.open("w", buffering=1)
-    csv_f.write("file_id,sisnr,sisnri,mix_sisnr,perm\n")
+    csv_f.write("file_id,sisnr,sisnri,mix_sisnr,stoi,pesq,perm\n")
 
-    sisnrs, sisnris = [], []
+    sisnrs, sisnris, stois, pesqs = [], [], [], []
     for idx, mp in enumerate(tqdm(mix_files, desc=name)):
         fid = mp.stem
         mix_np = load_wav(mp)
@@ -247,9 +273,20 @@ def eval_model(name: str, gdrive_id: str, audio_limit: int) -> dict:
         mix_si = float(np.mean([si_snr(mix_np, r) for r in refs]))
         sisnri = sep_si - mix_si
 
+        # Selaraskan estimasi ke ref pakai permutasi PIT terbaik (est utk ref i = ests[perm[i]]).
+        # STOI/PESQ tak permutation-invariant, jadi WAJIB pakai estimasi yang sudah diselaraskan.
+        aligned = [ests[perm[i]] for i in range(num_spk)]
+        stoi_m = float(np.nanmean([stoi_score(refs[i], aligned[i]) for i in range(num_spk)]))
+        pesq_m = float(np.nanmean([pesq_score(refs[i], aligned[i]) for i in range(num_spk)]))
+
         sisnrs.append(sep_si)
         sisnris.append(sisnri)
-        csv_f.write(f"{fid},{sep_si:.4f},{sisnri:.4f},{mix_si:.4f},{'-'.join(map(str, perm))}\n")
+        stois.append(stoi_m)
+        pesqs.append(pesq_m)
+        csv_f.write(
+            f"{fid},{sep_si:.4f},{sisnri:.4f},{mix_si:.4f},"
+            f"{stoi_m:.4f},{pesq_m:.4f},{'-'.join(map(str, perm))}\n"
+        )
 
         if idx < audio_limit:
             save_audio_set(audio_dir, fid, mix_np, refs, ests, perm)
@@ -258,6 +295,8 @@ def eval_model(name: str, gdrive_id: str, audio_limit: int) -> dict:
 
     arr_si = np.array(sisnrs)
     arr_sii = np.array(sisnris)
+    arr_stoi = np.array(stois)
+    arr_pesq = np.array(pesqs)
     stats = {
         "model": name,
         "num_spk": num_spk,
@@ -269,10 +308,16 @@ def eval_model(name: str, gdrive_id: str, audio_limit: int) -> dict:
         "median_sisnr": float(np.median(arr_si)),
         "mean_sisnri": float(arr_sii.mean()),
         "std_sisnri": float(arr_sii.std()),
+        "mean_stoi": float(np.nanmean(arr_stoi)),
+        "std_stoi": float(np.nanstd(arr_stoi)),
+        "mean_pesq": float(np.nanmean(arr_pesq)),
+        "std_pesq": float(np.nanstd(arr_pesq)),
     }
     (out_dir / "stats.json").write_text(json.dumps(stats, indent=2))
     print(f"  mean SI-SNR : {stats['mean_sisnr']:.3f} ± {stats['std_sisnr']:.3f} dB")
     print(f"  mean SI-SNRi: {stats['mean_sisnri']:.3f} ± {stats['std_sisnri']:.3f} dB")
+    print(f"  mean STOI   : {stats['mean_stoi']:.4f} ± {stats['std_stoi']:.4f}")
+    print(f"  mean PESQ   : {stats['mean_pesq']:.4f} ± {stats['std_pesq']:.4f}")
 
     del enc, sep, dec
     gc.collect()
