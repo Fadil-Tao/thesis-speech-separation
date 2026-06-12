@@ -1,7 +1,7 @@
 """Paper-faith eval pipeline.
 
-For each model in best-model-list.txt:
-  1. Download best_model.pth from Google Drive (if not present)
+For each model in best-model-list.txt (or auto-discovered locally):
+  1. Load best_model.pth from LOCAL checkpoints/<Nspeaker>/<variant>/ (no download)
   2. Run on full test set (matching num_spk dataset)
   3. Save per-file SI-SNR/SI-SNRi/STOI/PESQ CSV (all 3600)
   4. Save mixture + estimated + ground-truth WAVs (first 450 only)
@@ -58,7 +58,7 @@ EPS = 1e-8
 
 EVAL_DIR = Path(__file__).resolve().parent
 MODEL_LIST = EVAL_DIR / "best-model-list.txt"
-CKPT_CACHE = EVAL_DIR / "ckpts"
+CKPT_ROOT = ROOT / "checkpoints"          # checkpoint lokal (sumber utama)
 RESULTS_DIR = EVAL_DIR / "results"
 AUDIO_LIMIT_DEFAULT = 450
 
@@ -104,28 +104,46 @@ def parse_model_name(name: str) -> tuple[int, str]:
     return num_spk, arch
 
 
-def read_model_list() -> list[tuple[str, str]]:
-    out = []
-    for line in MODEL_LIST.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        name, gid = line.split("=", 1)
-        out.append((name.strip(), gid.strip()))
-    return out
+def discover_local_models() -> list[str]:
+    """Temukan model lokal: checkpoints/<Nspeaker>/<variant>/best_model.pth -> 'Nspeaker-variant'."""
+    found = []
+    for ckpt in sorted(CKPT_ROOT.glob("*/*/best_model.pth")):
+        variant = ckpt.parent.name           # 'skim-attention-transfer'
+        prefix = ckpt.parent.parent.name     # '2speaker' / '3speaker'
+        found.append(f"{prefix}-{variant}")
+    return found
 
 
-def ensure_checkpoint(name: str, gdrive_id: str) -> Path:
-    target = CKPT_CACHE / name / "best_model.pth"
-    if target.exists():
-        return target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    import gdown
-    url = f"https://drive.google.com/uc?id={gdrive_id}"
-    print(f"[download] {name} ← {url}")
-    gdown.download(url, str(target), quiet=False)
+def read_model_list() -> list[str]:
+    """Daftar nama model. Pakai best-model-list.txt bila ada (ambil kolom kiri sebelum '=',
+    abaikan id gdrive yang mungkin masih tertulis); selain itu temukan otomatis dari
+    direktori checkpoint lokal."""
+    if MODEL_LIST.exists():
+        names = []
+        for line in MODEL_LIST.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            names.append(line.split("=", 1)[0].strip())  # buang '=gid' bila ada
+        if names:
+            return names
+    return discover_local_models()
+
+
+def local_checkpoint(name: str) -> Path:
+    """Cari best_model.pth lokal. Tanpa download.
+
+    Nama model dipetakan ke layout direktori:
+      '3speaker-skim-attention-transfer'
+        -> checkpoints/3speaker/skim-attention-transfer/best_model.pth
+    """
+    prefix, variant = name.split("-", 1)  # ('3speaker', 'skim-attention-transfer')
+    target = CKPT_ROOT / prefix / variant / "best_model.pth"
     if not target.exists():
-        raise RuntimeError(f"download failed for {name}")
+        raise FileNotFoundError(
+            f"checkpoint lokal tak ada utk '{name}': {target}\n"
+            f"  letakkan best_model.pth di {CKPT_ROOT / prefix / variant}/"
+        )
     return target
 
 
@@ -241,13 +259,13 @@ def normalize_len(x):
     return x
 
 
-def eval_model(name: str, gdrive_id: str, audio_limit: int) -> dict:
+def eval_model(name: str, audio_limit: int) -> dict:
     num_spk, arch = parse_model_name(name)
     test_root = TEST_ROOT[num_spk]
     if not (test_root / "mix").exists():
         raise FileNotFoundError(f"test dataset not found: {test_root}")
 
-    ckpt_path = ensure_checkpoint(name, gdrive_id)
+    ckpt_path = local_checkpoint(name)
     enc, sep, dec = build_model(num_spk, arch, ckpt_path)
 
     out_dir = RESULTS_DIR / name
@@ -335,13 +353,13 @@ def main():
 
     print(f"device: {device}")
     print(f"audio_limit: {args.audio_limit}")
+    print(f"checkpoint root (lokal): {CKPT_ROOT}")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    CKPT_CACHE.mkdir(parents=True, exist_ok=True)
 
     entries = read_model_list()
     if args.models:
         wanted = set(args.models)
-        entries = [(n, g) for n, g in entries if n in wanted]
+        entries = [n for n in entries if n in wanted]
         if not entries:
             sys.exit(f"no matching models in list: {args.models}")
 
@@ -353,9 +371,9 @@ def main():
         except Exception:
             summary = {}
 
-    for name, gid in entries:
+    for name in entries:
         try:
-            stats = eval_model(name, gid, args.audio_limit)
+            stats = eval_model(name, args.audio_limit)
             summary[name] = stats
             summary_path.write_text(json.dumps(summary, indent=2))
         except Exception as e:
